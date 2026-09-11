@@ -140,8 +140,9 @@ media-bias assessments and are meant to be adjustable.
 
 | Outlet | Lean | Feed |
 |---|---|---|
-| HuffPost | left | https://www.huffpost.com/section/front-page/feed |
+| HuffPost | left | https://www.huffpost.com/section/politics/feed |
 | Vox | left | https://www.vox.com/rss/index.xml |
+| Salon | left | https://www.salon.com/feed/ |
 | The Guardian (US) | lean_left | https://www.theguardian.com/us-news/rss |
 | NPR | lean_left | https://feeds.npr.org/1001/rss.xml |
 | CNN | lean_left | http://rss.cnn.com/rss/cnn_topstories.rss |
@@ -161,11 +162,27 @@ media-bias assessments and are meant to be adjustable.
 | Daily Wire | right | https://www.dailywire.com/feeds/rss.xml |
 | Newsmax | right | https://www.newsmax.com/rss/Newsfront/16/ |
 
-**These URLs are unverified.** Feeds move and die. Verify each one, use the
-working set, and report every failure with its status so the Architect can
-replace it. Do not silently drop an outlet — losing one end of the spectrum
-quietly is worse than a visible error, because the product's whole claim is
-balanced coverage.
+**Verify every URL before trusting it.** Feeds move, die, start returning 403,
+or return HTTP 200 with zero items — the last one is the dangerous case, because
+it looks like success. Use the working set and report every failure with its
+status so the Architect can replace it. Do not silently drop an outlet — losing
+one end of the spectrum quietly is worse than a visible error, because the
+product's whole claim is balanced coverage.
+
+**Registry changelog**
+
+- 2026-09-10 — HuffPost moved from `/section/front-page/feed` (HTTP 200, zero
+  items, empty upstream) to `/section/politics/feed` (50 items). Caveat: this is
+  politics-only where every other feed is general news, so HuffPost's
+  contribution to the corpus is narrower than its peers.
+- 2026-09-10 — Salon added as `left`. Rationale: `left` held only Vox once
+  HuffPost broke, and the registry skewed 7 left-ish / 8 right-ish. Salon
+  restores it to 8 / 5 / 8. Chosen over Mother Jones, The Nation, and The
+  Intercept because it publishes high-volume general news — investigative
+  outlets mostly run stories no one else covers, which produces singleton
+  clusters with no spread to display. MSNBC was the first choice as the
+  structural mirror of Fox News but returns HTTP 403 to feed readers; The
+  Nation's feed is empty.
 
 ## Out of scope for slice 1
 

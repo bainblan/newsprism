@@ -36,15 +36,17 @@ OUTLETS: tuple[Outlet, ...] = (
     Outlet(
         "HuffPost",
         "left",
-        "https://www.huffpost.com/section/front-page/feed",
+        "https://www.huffpost.com/section/politics/feed",
         note=(
-            "Verified 2026-09-10: HTTP 200 but the feed body contains zero "
-            "<item> elements, so no articles can be ingested. "
-            "https://www.huffpost.com/section/politics/feed returns 50 items "
-            "and is a tested replacement candidate — Architect's call."
+            "Moved 2026-09-10 from /section/front-page/feed (HTTP 200, zero "
+            "<item> elements, empty upstream) to /section/politics/feed (50 "
+            "items verified). Politics-only where every other feed is general "
+            "news, so this outlet's contribution to the corpus is narrower "
+            "than its peers."
         ),
     ),
     Outlet("Vox", "left", "https://www.vox.com/rss/index.xml"),
+    Outlet("Salon", "left", "https://www.salon.com/feed/"),
     Outlet("The Guardian (US)", "lean_left", "https://www.theguardian.com/us-news/rss"),
     Outlet("NPR", "lean_left", "https://feeds.npr.org/1001/rss.xml"),
     Outlet("CNN", "lean_left", "http://rss.cnn.com/rss/cnn_topstories.rss"),

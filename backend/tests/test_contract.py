@@ -215,7 +215,7 @@ def test_stories_sorted_newest_first(client):
 def test_outlets_shape(client):
     body = client.get("/api/outlets").json()
     assert set(body) == {"outlets"}
-    assert len(body["outlets"]) == len(OUTLETS) == 20
+    assert len(body["outlets"]) == len(OUTLETS) == 21
     for outlet in body["outlets"]:
         assert set(outlet) == {"name", "lean", "feed_url", "active"}
         assert outlet["lean"] in LEANS
@@ -227,6 +227,7 @@ def test_outlet_registry_matches_the_contract_table():
     expected = {
         ("HuffPost", "left"),
         ("Vox", "left"),
+        ("Salon", "left"),
         ("The Guardian (US)", "lean_left"),
         ("NPR", "lean_left"),
         ("CNN", "lean_left"),
