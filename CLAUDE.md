@@ -247,6 +247,11 @@ Python backend, and Render instead of Vercel.
 
 ## Working agreements
 
+- **Report in bullets, not prose.** The user reads reports as **bolded
+  headlines** with bullets under them — at most 10 bullets, and fewer is better.
+  Never drop a key detail to hit the count; cut the throat-clearing instead. A
+  short table beats a bulleted list of the same facts. Long paragraphs are the
+  thing to avoid, not length itself.
 - **One thing at a time.** Finish and confirm before starting the next piece.
 - Repos here are created **public** — a committed secret is disclosed
   immediately and permanently.
