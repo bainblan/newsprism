@@ -30,13 +30,25 @@ from zero test infrastructure to **68 tests** (Vitest + React Testing Library),
 and both halves now run in GitHub Actions. Not yet observed on a real runner:
 the workflow has never been pushed. See "Testing and CI" below.
 
+Slice 1.3 — **ONNX embedding backend** — is built, reviewed, and verified. torch
+and sentence-transformers are gone from the default install; the same model runs
+under `onnxruntime`. Peak RSS through the real ingest path fell **692 MB → 355
+MB**, which is what makes a 512 MB host viable. The vectors are not merely close
+but equivalent — min per-row cosine **0.99999988** against the torch baseline,
+and the group partition is byte-identical on both the 856-article window and the
+997-article full corpus, so the 0.62 threshold is untouched. Backend suite is 47
+tests. See `docs/onnx-migration.md`.
+
 ```
 frontend/   Next.js 16, TypeScript, Tailwind, App Router, src/ dir
             *.test.ts(x) sit beside what they test; src/test/ holds fixtures
-backend/    FastAPI + SQLite, feedparser, sentence-transformers
+backend/    FastAPI + SQLite, feedparser, onnxruntime
             app/tracking.py ← story identity: pure, DB-free, unit-testable
+            app/clustering/onnx_embedding.py ← the default embedder
+            app/clustering/embedding.py      ← torch reference, not installed
 docs/       api-contract.md  ← the frozen interface both halves were built against
             testing.md       ← runner choice, script contract, what's worth testing
+            onnx-migration.md ← slice 1.3 spec, measured costs, equivalence proof
 .github/    workflows/ci.yml ← frontend + backend as parallel jobs
 ```
 
@@ -63,8 +75,8 @@ Frontend mocks work without the backend:
 
 ## How it works
 
-Ingest → embed (`all-MiniLM-L6-v2`, CPU) → average-linkage agglomerative
-clustering over cosine distance at **threshold 0.62** → bias-tag by outlet →
+Ingest → embed (`all-MiniLM-L6-v2` via **onnxruntime**, CPU) → average-linkage
+agglomerative clustering over cosine distance at **threshold 0.62** → bias-tag →
 **match the resulting anonymous groups to durable story ids** → SQLite → API →
 coverage-spread UI.
 
@@ -94,7 +106,7 @@ ranked list of what is worth testing. Architect-owned, like the API contract.
 
 | | |
 |---|---|
-| backend | 40 tests, `pytest`, offline against a temp SQLite file |
+| backend | 47 tests, `pytest`, offline against a temp SQLite file |
 | frontend | 68 tests, Vitest + React Testing Library + jsdom |
 | CI | `.github/workflows/ci.yml`, two parallel jobs |
 
@@ -125,6 +137,20 @@ staleness guards (`requestSeq` in the provider, `resolvedDetail` in the detail
 page). A suite that has never been shown to fail is not yet evidence of
 anything — this is the cheapest way to find out whether it has teeth.
 
+**Slice 1.3 is the case for why mutation testing is not optional.** The ONNX
+clusterer arrived with 6 new tests, a green suite, and an Architect verification
+that passed 10/10 against the real corpus. QA then deleted the length-bucket
+scatter-back — the line that returns each article's vector to its own index —
+and *all 46 tests still passed*. Nothing else would have caught it: the
+equivalence check only ever compares the current code to the baseline, so it
+cannot notice a test that constrains nothing. The fake tokenizer handed every
+document the same token count, which made the sort a no-op and the bucketing
+untested. In production, headlines vary in length, batches genuinely reorder,
+and a break there would swap embeddings between unrelated articles silently.
+**A test whose fixture flattens the variation it exists to exercise is not a
+test.** The fakes now use distinct per-document token counts, and the mutation
+was re-applied afterwards to watch it fail.
+
 Known gaps, all deliberate: the `TIMEOUT` branch in `api.ts` (needs real
 `AbortSignal.timeout` expiry), the `USE_MOCK_DATA` branch, and end-to-end tests
 entirely. Do not assert on Tailwind classes or `LEAN_META` label strings — those
@@ -141,11 +167,17 @@ tests fail on every redesign and catch nothing.
 - **Newsmax times out** intermittently (rate limiting); costs ~30s per ingest.
 - **One known-bad cluster:** a Missouri cluster merges three distinct legal
   events. Threshold tuning does not fix it — it needs entity/date awareness.
-- **The backend job installs the full ~1 GB pinned dependency set** (torch and
-  sentence-transformers included, though the suite forces
-  `NEWSPRISM_CLUSTERER=tfidf` and never imports them). Deliberate: a convenient
-  subset would test a dependency set no user and no deployment has. The first
-  run took ~1 min to install; the pip cache makes later ones cheap.
+- **Every ingest encodes the clustering window twice.** `pipeline.recluster()`
+  calls `clusterer.vectors()` and then `clusterer.cluster()`, and `cluster()`
+  re-encodes internally. Found by QA during slice 1.3; it predates that slice
+  (`embedding.py` had the same shape). Costs ~25 s of the 63.9 s ingest. Not
+  fixed yet because the clean fix changes the `Clusterer` protocol so one pass
+  yields both vectors and groups — a seam decision that wants its own slice.
+- **CI installs `requirements.txt` only, never `requirements-torch.txt`.** The
+  principle is unchanged from slice 1.2 — test the dependency set the deployment
+  actually has — but the set is no longer ~1 GB. The torch extra exists only to
+  re-verify ONNX/torch equivalence after a model change; nothing deployed
+  imports it.
 
 ## Story identity (slice 1.1)
 
@@ -244,7 +276,7 @@ Acting as Architect:
 |---|---|
 | Node | v22.19.0 |
 | npm | 11.10.0 |
-| Python | 3.13.7 — `torch` 2.8.0+cpu and `sentence-transformers` 5.1.1 install fine |
+| Python | 3.13.7 — `onnxruntime` 1.30.0 is the default; the torch extra also installs fine |
 | git | 2.51.0.windows.1 |
 | gh | 2.100.0 — authed as `bainblan` |
 | vercel | 59.15.1 — authed as `bainblan` |
@@ -286,9 +318,13 @@ Python backend, and Render instead of Vercel.
 
 ## Open decisions
 
-- **Next slice** — deployment to Render (recommended; it is now the only
-  infrastructure gap left, and CI already proves the Linux dependency pins
-  resolve) or LLM synthesis. Frontend tests are done as of slice 1.2.
+- **Next slice** — deployment to Render, **in progress**. Slice 1.3 was pulled in
+  ahead of it because sizing the host revealed the backend needed 692 MB, and
+  renting 2 GB to run a training framework in inference mode was the wrong
+  trade. Now that it fits 512 MB, the deploy is the only infrastructure gap left.
+- **The double encode per ingest** (see "Known issues") — worth a slice on its
+  own. The fix is a `Clusterer` protocol change so one pass returns vectors and
+  groups together, which touches the seam every clusterer implements.
 - **End-to-end tests** — deliberately out of scope in slice 1.2, which covered
   units and components only. Playwright against a running backend is the
   obvious next increment, and it is a real decision with a real CI cost rather

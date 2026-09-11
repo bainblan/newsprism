@@ -1,9 +1,4 @@
 # newsprism backend — pinned for Python 3.13 on Windows, CPU only.
-#
-# torch is pulled from the PyTorch CPU index. On Windows the PyPI wheel is
-# already CPU-only, but pinning the index makes the intent explicit and keeps
-# the install identical on Linux/CI, where the PyPI default is a CUDA build.
---extra-index-url https://download.pytorch.org/whl/cpu
 
 # --- web ---
 fastapi==0.118.0
@@ -18,5 +13,6 @@ python-dateutil==2.9.0.post0
 # --- clustering ---
 numpy==2.3.3
 scikit-learn==1.7.2
-torch==2.8.0+cpu
-sentence-transformers==5.1.1
+onnxruntime==1.30.0
+tokenizers==0.22.2
+huggingface_hub==0.36.2

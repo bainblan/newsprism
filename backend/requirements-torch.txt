@@ -1,0 +1,12 @@
+# Reference embedding path — the pre-ONNX-migration implementation
+# (app/clustering/embedding.py), kept for equivalence re-verification after
+# any future model change. Not installed by default: torch + sentence-
+# transformers add ~800 MB, almost all of it a training framework used here
+# only for inference. See docs/onnx-migration.md.
+#
+# Install with: pip install -r requirements-torch.txt
+-r requirements.txt
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.8.0+cpu
+sentence-transformers==5.1.1

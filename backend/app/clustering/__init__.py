@@ -13,12 +13,12 @@ import logging
 
 from ..config import settings
 from .base import Clusterer, Document
-from .embedding import EmbeddingClusterer
+from .onnx_embedding import OnnxClusterer
 from .tfidf import TfidfClusterer
 
 log = logging.getLogger("newsprism.clustering")
 
-__all__ = ["Clusterer", "Document", "EmbeddingClusterer", "TfidfClusterer", "get_clusterer"]
+__all__ = ["Clusterer", "Document", "OnnxClusterer", "TfidfClusterer", "get_clusterer"]
 
 _cached: Clusterer | None = None
 
@@ -26,9 +26,19 @@ _cached: Clusterer | None = None
 def _build(name: str) -> Clusterer:
     if name == "tfidf":
         return TfidfClusterer()
+    if name == "onnx":
+        return OnnxClusterer()
     if name == "embedding":
+        # Reference implementation only: requires the torch/sentence-
+        # transformers extra (requirements-torch.txt), not installed by
+        # default. Kept importable for equivalence re-verification after a
+        # future model change - see docs/onnx-migration.md.
+        from .embedding import EmbeddingClusterer
+
         return EmbeddingClusterer()
-    raise ValueError(f"unknown clusterer {name!r}; expected 'embedding' or 'tfidf'")
+    raise ValueError(
+        f"unknown clusterer {name!r}; expected 'onnx', 'embedding', or 'tfidf'"
+    )
 
 
 def get_clusterer(force: str | None = None) -> Clusterer:

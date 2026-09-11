@@ -48,7 +48,7 @@ def _resolve_db_path() -> Path:
 class Settings:
     db_path: Path = field(default_factory=_resolve_db_path)
     clusterer: str = field(
-        default_factory=lambda: _env_str("NEWSPRISM_CLUSTERER", "embedding")
+        default_factory=lambda: _env_str("NEWSPRISM_CLUSTERER", "onnx")
     )
     similarity_threshold: float = field(
         default_factory=lambda: _env_float("NEWSPRISM_SIMILARITY_THRESHOLD", 0.62)

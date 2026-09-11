@@ -74,14 +74,20 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements*.txt
 
-      # The FULL pinned dependency set, torch and sentence-transformers
-      # included, even though the suite forces NEWSPRISM_CLUSTERER=tfidf and
-      # never imports them. Installing a convenient subset would test a
-      # dependency set no user and no deployment has — and this is the first
-      # thing in the project that proves the Linux pins resolve at all, which
-      # the Render deploy depends on. requirements.txt already points torch at
-      # the CPU index, so no CUDA build is fetched. pip cache makes repeat
-      # runs cheap.
+      # The FULL pinned dependency set — the one the deployment actually has.
+      # Installing a convenient subset would test a dependency set no user and
+      # no deployment runs, so the principle stands even though the set is now
+      # small: slice 1.3 replaced torch + sentence-transformers (~800 MB, a
+      # training framework used only for inference) with onnxruntime, and
+      # requirements.txt is what ships to Render.
+      #
+      # Deliberately NOT requirements-torch.txt. That extra exists only to
+      # re-verify ONNX/torch vector equivalence after a model change
+      # (docs/onnx-migration.md); nothing deployed imports it, so CI installing
+      # it would be testing a machine that does not exist.
+      #
+      # This job is still the only thing that proves the Linux pins resolve at
+      # all, which the Render deploy depends on.
       - name: Install dependencies
         run: pip install -r requirements.txt -r requirements-dev.txt
 

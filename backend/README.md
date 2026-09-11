@@ -53,14 +53,21 @@ app/
   clustering/
     base.py            Document + Clusterer protocol  <- the swap point
     agglomerative.py   shared cosine grouping
-    embedding.py       default: all-MiniLM-L6-v2, CPU
-    tfidf.py           fallback: scikit-learn, no torch
+    onnx_embedding.py  default: all-MiniLM-L6-v2 via onnxruntime, no torch
+    embedding.py       reference implementation onnx_embedding.py must match
+                        (torch/sentence-transformers; requirements-torch.txt)
+    tfidf.py           fallback: scikit-learn, no model download
 ```
 
 ## Clustering
 
-Title + lead are embedded with `sentence-transformers/all-MiniLM-L6-v2` on CPU,
+Title + lead are embedded with `sentence-transformers/all-MiniLM-L6-v2`
+(fp32 ONNX export, `app/clustering/onnx_embedding.py`, CPU only — no torch),
 then grouped by average-linkage agglomerative clustering over cosine distance.
+See `docs/onnx-migration.md` for why: torch was ~800 MB of a training
+framework loaded to run inference, and the ONNX path reproduces its vectors to
+within float noise (per-row cosine ≥ 0.9999 against the torch reference on the
+project's real corpus).
 
 **Threshold: 0.62 cosine** (`NEWSPRISM_SIMILARITY_THRESHOLD`). Tuned against
 524 live articles from 18 feeds:
@@ -80,11 +87,12 @@ own premise degrades: the flagship "$5,000 payout" story fell from 9 articles
 across 8 outlets to 5 across 5, losing the Guardian, BBC and Al Jazeera and with
 them most of the left-right spread the page exists to show.
 
-Swap the algorithm with `NEWSPRISM_CLUSTERER=tfidf`. Nothing outside
-`app/clustering/` changes. It is a genuine fallback for machines where torch
-will not install, but it is much weaker: on the same 524 articles it found 9
-multi-article clusters against the embedding model's 59, because it matches
-words rather than meaning.
+Swap the algorithm with `NEWSPRISM_CLUSTERER=tfidf` (no model download at all)
+or `NEWSPRISM_CLUSTERER=embedding` (the torch reference implementation, needs
+`pip install -r requirements-torch.txt`). Nothing outside `app/clustering/`
+changes either way. TF-IDF is a genuine fallback, not dead code, but it is much
+weaker: on 524 live articles it found 9 multi-article clusters against the
+embedding model's 59, because it matches words rather than meaning.
 
 Clusters are recomputed from scratch on every ingest, over articles published
 within `NEWSPRISM_CLUSTER_WINDOW_DAYS` (default 4). The window matters: without
@@ -102,7 +110,7 @@ All optional; see `.env.example`. `.env` is gitignored and this repo is public.
 | Variable | Default |
 |---|---|
 | `NEWSPRISM_DB_PATH` | `data/newsprism.db` |
-| `NEWSPRISM_CLUSTERER` | `embedding` |
+| `NEWSPRISM_CLUSTERER` | `onnx` |
 | `NEWSPRISM_SIMILARITY_THRESHOLD` | `0.62` |
 | `NEWSPRISM_EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` |
 | `NEWSPRISM_CLUSTER_WINDOW_DAYS` | `4` |
@@ -111,9 +119,11 @@ All optional; see `.env.example`. `.env` is gitignored and this repo is public.
 | `NEWSPRISM_FEED_RETRIES` | `2` |
 | `NEWSPRISM_CORS_ORIGINS` | `http://localhost:3000,http://127.0.0.1:3000` |
 
-There are no secrets in slice 1. The model downloads from Hugging Face on first
-use (~90 MB, cached in `~/.cache/huggingface`), so the first ingest needs
-network access beyond the feeds themselves.
+There are no secrets in slice 1. Model artifacts (the ONNX weights and
+tokenizer, ~90 MB) download from Hugging Face on first use via
+`huggingface_hub`, cached under `HF_HOME` (defaults to
+`~/.cache/huggingface`), so the first ingest needs network access beyond the
+feeds themselves.
 
 ## Known feed failures (verified 2026-09-10)
 
