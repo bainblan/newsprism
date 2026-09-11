@@ -38,6 +38,10 @@ def no_data(message: str) -> ApiError:
     return ApiError(503, "NO_DATA", message)
 
 
+def not_found(message: str) -> ApiError:
+    return ApiError(404, "NOT_FOUND", message)
+
+
 def internal(message: str = "An unexpected internal error occurred.") -> ApiError:
     # Never pass exception text in here: the contract forbids leaking traces.
     return ApiError(500, "INTERNAL", message)

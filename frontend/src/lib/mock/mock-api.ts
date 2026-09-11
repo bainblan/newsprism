@@ -57,6 +57,8 @@ function buildStory(input: {
   summary: string;
   updatedMinutesAgo: number;
   sources: MockSource[];
+  /** Defaults to false, matching every story reachable through the list. */
+  archived?: boolean;
 }): Story {
   const coverage: Coverage = {
     left: 0,
@@ -82,6 +84,7 @@ function buildStory(input: {
     title: input.title,
     summary: input.summary,
     updated_at: minutesAgo(input.updatedMinutesAgo),
+    archived: input.archived ?? false,
     article_count: sources.length,
     coverage,
     sources,
@@ -441,6 +444,52 @@ const MOCK_STORIES: Story[] = [
   }),
 ];
 
+/**
+ * Reachable only through GET /api/stories/{id}, never through the list — which
+ * is exactly what `archived: true` means: aged out of the clustering window,
+ * no longer gaining coverage, but still a complete story if you have the link.
+ */
+const MOCK_ARCHIVED_STORY: Story = buildStory({
+  id: "c_archived7",
+  title: "Regional rail operator settles two-year signal-outage lawsuit",
+  summary:
+    "The settlement closes litigation over a 2024 outage that stranded commuters for six hours; terms were not disclosed. Coverage ended within the week.",
+  updatedMinutesAgo: 60 * 24 * 40,
+  archived: true,
+  sources: [
+    {
+      outlet: "Reuters",
+      lean: "center",
+      title: "Rail operator settles signal-outage suit",
+      minutesAgo: 60 * 24 * 40,
+    },
+    {
+      outlet: "The Hill",
+      lean: "center",
+      title: "Commuter rail operator reaches settlement over 2024 outage",
+      minutesAgo: 60 * 24 * 40 + 20,
+    },
+    {
+      outlet: "Washington Examiner",
+      lean: "lean_right",
+      title: "Rail agency pays out over signal failure that stranded riders",
+      minutesAgo: 60 * 24 * 40 + 35,
+    },
+  ],
+});
+
+/**
+ * Retired id -> where it points next. `mockFetchStory` walks this until it
+ * lands on a live id, so a chain (A -> B -> C) resolves fully in one request,
+ * matching the contract's alias-chain guarantee. `c_retired_b` -> `c_8f3a1b`
+ * exercises a plain single-hop alias; `c_retired_a` -> `c_retired_b` exercises
+ * the chained case on top of it.
+ */
+const MOCK_ALIASES: Record<string, string> = {
+  c_retired_a: "c_retired_b",
+  c_retired_b: "c_8f3a1b",
+};
+
 const MOCK_OUTLETS: OutletsResponse = {
   outlets: [
     {
@@ -539,6 +588,86 @@ export async function mockFetchStories(): Promise<StoriesResponse> {
     default:
       return { generated_at: nowIso(), stories: MOCK_STORIES };
   }
+}
+
+/**
+ * GET /api/stories/{id}. Reuses the `no_data` / `error` / `offline` scenarios
+ * exactly as mockFetchStories does — those describe the backend's overall
+ * health, not anything specific to one story — and adds lookup behaviour on
+ * top for the `stories` and `empty` scenarios, since per the contract
+ * `min_sources` and `limit` don't apply to a direct lookup either way.
+ *
+ * Three ids exercise the paths a live backend can produce that the list alone
+ * cannot:
+ *   - `c_archived7`             — a normal 200 with `archived: true`.
+ *   - `c_retired_b`             — a single-hop alias; resolves to `c_8f3a1b`.
+ *   - `c_retired_a`             — a two-hop alias chain, also resolving to `c_8f3a1b`.
+ * Any other id not present in MOCK_STORIES or the archived fixture 404s, and
+ * an id from MOCK_STORIES itself is the plain, non-alias hit.
+ */
+export async function mockFetchStory(id: string): Promise<Story> {
+  await sleep(MOCK_LATENCY_MS);
+
+  switch (MOCK_SCENARIO) {
+    case "no_data":
+      if (!hasIngested) {
+        throw new ApiError({
+          kind: "api",
+          status: 503,
+          code: "NO_DATA",
+          url: `mock://api/stories/${id}`,
+          message: "No stories yet. Ingest has never run on this database.",
+        });
+      }
+      break;
+
+    case "error":
+      throw new ApiError({
+        kind: "api",
+        status: 500,
+        code: "INTERNAL",
+        url: `mock://api/stories/${id}`,
+        message: "Something went wrong on the server.",
+      });
+
+    case "offline":
+      throw new ApiError({
+        kind: "network",
+        code: "UNREACHABLE",
+        url: `mock://api/stories/${id}`,
+        message: "Could not reach the backend.",
+      });
+
+    case "empty":
+    case "stories":
+    default:
+      break;
+  }
+
+  // Walk the alias table to its end, matching the contract's guarantee that a
+  // chain of retirements (A -> B -> C) resolves fully in one request.
+  let resolvedId = id;
+  const seen = new Set<string>();
+  while (MOCK_ALIASES[resolvedId] && !seen.has(resolvedId)) {
+    seen.add(resolvedId);
+    resolvedId = MOCK_ALIASES[resolvedId];
+  }
+
+  const story = [...MOCK_STORIES, MOCK_ARCHIVED_STORY].find(
+    (candidate) => candidate.id === resolvedId,
+  );
+
+  if (!story) {
+    throw new ApiError({
+      kind: "api",
+      status: 404,
+      code: "NOT_FOUND",
+      url: `mock://api/stories/${id}`,
+      message: `No story found for id "${id}".`,
+    });
+  }
+
+  return story;
 }
 
 export async function mockRunIngest(): Promise<IngestResult> {

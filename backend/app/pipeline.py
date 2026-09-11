@@ -6,7 +6,6 @@ and POST /api/ingest blocks on it.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import time
 from typing import Any
@@ -18,23 +17,12 @@ from .config import settings
 from .db import init_db
 from .outlets import active_outlets
 from .rss import dedupe, fetch_all
-from .store import articles_for_clustering, replace_clusters, upsert_articles
+from .store import articles_for_clustering, track_and_persist_stories, upsert_articles
 from .timeutil import now_iso_z
 
 log = logging.getLogger("newsprism.pipeline")
 
 LAST_INGEST_KEY = "last_ingest_at"
-
-
-def cluster_id(article_ids: list[str]) -> str:
-    """Stable, opaque id derived from cluster membership.
-
-    Same members in, same id out, so a story keeps its identity across ingest
-    runs that do not change its composition. The contract says the frontend
-    must not parse ids, and nothing here invites it to.
-    """
-    digest = hashlib.sha1("|".join(sorted(article_ids)).encode("utf-8")).hexdigest()
-    return "c_" + digest[:12]
 
 
 def _pick_representative(
@@ -99,16 +87,24 @@ def run_ingest() -> dict[str, Any]:
 
 
 def recluster() -> int:
-    """Recompute all clusters from the stored articles in the recency window.
+    """Recompute this run's clustering groups and match them to durable stories.
 
-    Returns the number of *multi-article* clusters, which is what
-    ``clusters_formed`` reports: a singleton is not a story with spread, and
-    counting them would make the number track the article count instead of
-    saying anything about clustering.
+    Only in-window articles are clustered — that is what keeps clustering
+    about events rather than topics — but story *identity* and *membership*
+    are handled by ``store.track_and_persist_stories``, which compares
+    against the previous run's stories and inherits ids where the overlap is
+    good enough. See ``app/tracking.py`` for the matching algorithm.
+
+    Returns the number of *multi-article* groups formed this run, which is
+    what ``clusters_formed`` reports: a singleton is not a story with spread,
+    and counting them would make the number track the article count instead
+    of saying anything about clustering.
     """
     rows = articles_for_clustering(settings.cluster_window_days)
+    window_ids = {row["id"] for row in rows}
+
     if not rows:
-        replace_clusters([])
+        track_and_persist_stories([], window_ids)
         return 0
 
     documents = [
@@ -132,7 +128,7 @@ def recluster() -> int:
 
     index_of = {doc.id: i for i, doc in enumerate(documents)}
 
-    clusters: list[dict[str, Any]] = []
+    group_infos: list[dict[str, Any]] = []
     multi = 0
     for group in groups:
         members = [by_id[article_id] for article_id in group]
@@ -142,28 +138,25 @@ def recluster() -> int:
             else np.zeros((0, 1), dtype=np.float32)
         )
         representative = _pick_representative(members, member_vectors)
-        clusters.append(
+        group_infos.append(
             {
-                "id": cluster_id(group),
+                "article_ids": group,
                 "title": representative["title"],
                 "summary": representative["summary"] or "",
-                # Newest member wins: a story's updated_at is when it last got
-                # new coverage.
-                "updated_at": max(m["published_at"] for m in members),
-                "article_ids": group,
             }
         )
         if len(group) > 1:
             multi += 1
 
-    replace_clusters(clusters)
+    story_ids = track_and_persist_stories(group_infos, window_ids)
     log.info(
-        "clustered %d articles into %d clusters (%d multi-source) using %s",
+        "clustered %d articles into %d groups (%d multi-source) using %s",
         len(documents),
-        len(clusters),
+        len(group_infos),
         multi,
         clusterer.name,
     )
+    assert len(story_ids) == len(group_infos)  # noqa: S101 - internal invariant, not user input
     return multi
 
 

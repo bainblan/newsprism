@@ -19,7 +19,7 @@ from fastapi import APIRouter, Query
 
 from . import store
 from .db import article_count, init_db
-from .errors import internal, no_data
+from .errors import internal, no_data, not_found
 from .outlets import OUTLETS
 from .pipeline import mark_ingest_time, run_ingest
 from .schemas import (
@@ -27,6 +27,7 @@ from .schemas import (
     IngestResponse,
     OutletsResponse,
     StoriesResponse,
+    StoryResponse,
 )
 from .timeutil import now_iso_z
 
@@ -41,6 +42,11 @@ ERROR_RESPONSES = {
     422: {"model": ErrorResponse, "description": "INVALID_PARAM"},
     500: {"model": ErrorResponse, "description": "INTERNAL"},
     503: {"model": ErrorResponse, "description": "NO_DATA"},
+}
+
+STORY_ERROR_RESPONSES = {
+    **ERROR_RESPONSES,
+    404: {"model": ErrorResponse, "description": "NOT_FOUND"},
 }
 
 
@@ -83,6 +89,46 @@ def list_stories(
     # An empty list here is valid and not an error: articles exist, but no
     # cluster reached min_sources.
     return StoriesResponse(generated_at=now_iso_z(), stories=stories)
+
+
+@router.get(
+    "/stories/{story_id}", response_model=StoryResponse, responses=STORY_ERROR_RESPONSES
+)
+def get_story(story_id: str) -> StoryResponse:
+    """Fetch one story by id or retired alias.
+
+    ``story_id`` is a bare string with no format validation: it is opaque
+    per the contract, and a regex here would risk rejecting a legitimate id
+    the frontend is only ever supposed to echo back verbatim.
+
+    ``min_sources`` and ``limit`` never apply here — a direct link is a
+    request for a specific thing, not a browsing decision. Aliases resolve
+    transparently: the response carries the *canonical* id, not the one in
+    the URL, with no HTTP redirect.
+    """
+    try:
+        init_db()
+        total_articles = article_count()
+    except Exception:
+        log.exception("story lookup: database unavailable")
+        raise internal("Could not read the story database.") from None
+
+    if total_articles == 0:
+        raise no_data(
+            "No articles have been ingested yet. Run POST /api/ingest to populate "
+            "the database."
+        )
+
+    try:
+        story = store.get_story_by_id(story_id)
+    except Exception:
+        log.exception("story lookup: query failed")
+        raise internal("Could not look up that story.") from None
+
+    if story is None:
+        raise not_found(f"No story or alias matches id '{story_id}'.")
+
+    return StoryResponse(story=story)
 
 
 @router.post("/ingest", response_model=IngestResponse, responses=ERROR_RESPONSES)

@@ -78,6 +78,13 @@ export function StoryDetail({ story }: { story: Story }) {
             {formatRelativeTime(story.updated_at)}
           </time>
         </p>
+
+        {story.archived ? (
+          <p className="mt-2 text-xs text-subtle">
+            Archived — this story&apos;s coverage has aged out, so it no
+            longer appears in the list and won&apos;t gain new sources.
+          </p>
+        ) : null}
       </header>
 
       <section

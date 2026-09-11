@@ -61,6 +61,9 @@ class Settings:
     cluster_window_days: int = field(
         default_factory=lambda: _env_int("NEWSPRISM_CLUSTER_WINDOW_DAYS", 4)
     )
+    id_containment_threshold: float = field(
+        default_factory=lambda: _env_float("NEWSPRISM_ID_CONTAINMENT_THRESHOLD", 0.5)
+    )
     feed_timeout_seconds: float = field(
         default_factory=lambda: _env_float("NEWSPRISM_FEED_TIMEOUT_SECONDS", 15.0)
     )

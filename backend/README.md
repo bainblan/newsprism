@@ -106,6 +106,7 @@ All optional; see `.env.example`. `.env` is gitignored and this repo is public.
 | `NEWSPRISM_SIMILARITY_THRESHOLD` | `0.62` |
 | `NEWSPRISM_EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` |
 | `NEWSPRISM_CLUSTER_WINDOW_DAYS` | `4` |
+| `NEWSPRISM_ID_CONTAINMENT_THRESHOLD` | `0.5` |
 | `NEWSPRISM_FEED_TIMEOUT_SECONDS` | `15` |
 | `NEWSPRISM_FEED_RETRIES` | `2` |
 | `NEWSPRISM_CORS_ORIGINS` | `http://localhost:3000,http://127.0.0.1:3000` |

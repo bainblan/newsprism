@@ -35,6 +35,7 @@ class Story(BaseModel):
     title: str
     summary: str
     updated_at: str
+    archived: bool
     article_count: int
     coverage: Coverage
     sources: list[Source]
@@ -43,6 +44,10 @@ class Story(BaseModel):
 class StoriesResponse(BaseModel):
     generated_at: str
     stories: list[Story]
+
+
+class StoryResponse(BaseModel):
+    story: Story
 
 
 class IngestResponse(BaseModel):

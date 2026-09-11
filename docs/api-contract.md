@@ -1,7 +1,15 @@
-# API Contract — v1 (slice 1)
+# API Contract — v1.1 (slice 1 + story lookup)
 
-**Status:** frozen for slice 1. Neither the frontend nor the backend agent may
-change this unilaterally. If it is unworkable, stop and report to the Architect.
+**Status:** frozen. Neither the frontend nor the backend agent may change this
+unilaterally. If it is unworkable, stop and report to the Architect.
+
+**Amended 2026-09-11 by the Architect (v1 → v1.1).** v1's one failure was an
+omission, not a contradiction: it never said whether a story `id` survives an
+ingest run, and it offered no way to fetch a single story. Both agents built
+correctly around that gap, and the result was link rot. v1.1 closes it by
+adding an ID-stability guarantee, `GET /api/stories/{id}`, an `archived` flag,
+and a `404 NOT_FOUND` code. The v1 shapes are otherwise unchanged — `archived`
+is the only new field on an existing object.
 
 The frontend and backend are built in parallel by agents who cannot see each
 other's work. This document is the only thing keeping the two halves compatible,
@@ -51,6 +59,7 @@ Returns clustered stories, newest first.
       "title": "Representative headline for the cluster",
       "summary": "Lead paragraph or feed description of the representative article.",
       "updated_at": "2026-09-10T14:23:00Z",
+      "archived": false,
       "article_count": 12,
       "coverage": {
         "left": 3,
@@ -81,6 +90,105 @@ Rules the frontend is entitled to rely on:
 - `sources` is every article in the cluster, so the frontend can render the
   detail view without a second request.
 - `stories` may be an empty array. That is a valid, non-error state.
+- `archived` is **always present** and is **always `false`** in this response.
+  The list only ever returns stories inside the clustering window. The field
+  exists here so the story object has one shape everywhere, not two.
+
+### ID stability (new in v1.1)
+
+A story `id` is **durable**. It identifies the story, not its contents, and it
+survives the story gaining or losing coverage.
+
+Specifically, the frontend is entitled to rely on all of the following:
+
+- An id, once issued, is **never reused** for a different story.
+- A story that gains an article **keeps** its id. This is the case v1 broke:
+  ids were a hash of the membership, so the ids that churned most were the ones
+  on the widest-covered stories — exactly the stories this product exists to
+  show.
+- A story that loses an article, or splits, keeps its id on the **larger**
+  surviving fragment.
+- When two stories merge, the **larger** one's id survives; ties go to the
+  older. The id that loses becomes a permanent alias for the survivor.
+- An id is still opaque. The frontend must not parse it, sort by it, or infer
+  anything from two ids being similar or different.
+
+Ids are durable, not immortal: a merge retires one of two ids, and the alias
+table is what keeps the retired one working. See `GET /api/stories/{id}`.
+
+## GET /api/stories/{id}
+
+Fetch one story by id. This is the endpoint that makes a shared URL survive —
+the list response is windowed and capped at `limit`, so it cannot answer for an
+old link on its own.
+
+**Path parameter**
+
+| Param | Type | Notes |
+|---|---|---|
+| `id` | string | An opaque story id. May be a current id or a retired alias. |
+
+**200 response**
+
+A single story object, identical in shape to one element of `stories` above,
+including `sources` and the five-key `coverage`:
+
+```json
+{
+  "story": {
+    "id": "c_8f3a1b",
+    "title": "Representative headline for the cluster",
+    "summary": "Lead paragraph or feed description of the representative article.",
+    "updated_at": "2026-09-10T14:23:00Z",
+    "archived": false,
+    "article_count": 12,
+    "coverage": { "left": 3, "lean_left": 2, "center": 4, "lean_right": 2, "right": 1 },
+    "sources": [
+      {
+        "outlet": "Reuters",
+        "lean": "center",
+        "title": "The headline as that outlet wrote it",
+        "url": "https://example.com/article",
+        "published_at": "2026-09-10T13:00:00Z"
+      }
+    ]
+  }
+}
+```
+
+Rules:
+
+- **`min_sources` does not apply here.** If you hold a link to a story that has
+  since dropped to one source, you still get the story. Filtering the list is a
+  browsing decision; a direct link is a request for a specific thing.
+- **`limit` does not apply here.** Position in the list is irrelevant.
+- **`archived` may be `true`.** It means the story's articles have aged out of
+  the clustering window, so the story no longer appears in the list and will not
+  gain new coverage. It is still fully renderable from its stored sources. The
+  frontend should render it normally and say plainly that it is no longer
+  updating — this is an archival read, not an error.
+- **Aliases resolve transparently.** Requesting a retired id returns `200` with
+  the **surviving** story, whose `story.id` is the canonical id and will differ
+  from the id in the URL. There is no HTTP redirect; the response body carries
+  the canonical id.
+- **The frontend must compare `story.id` against the requested id** and, when
+  they differ, rewrite the browser URL to the canonical one without adding a
+  history entry. Nothing else about rendering changes.
+- Alias chains resolve fully: if `A` retired into `B` and `B` later retired into
+  `C`, requesting `A` returns `C`.
+
+**Errors**
+
+| Status | `code` | When |
+|---|---|---|
+| 503 | `NO_DATA` | The database has never been populated. Same cold-start state as the list. |
+| 404 | `NOT_FOUND` | The database has articles, but no story or alias matches this id. |
+| 500 | `INTERNAL` | Anything else. |
+
+`404` is the honest answer only for an id that was never issued, or one whose
+story was removed outright. An id that merely gained coverage, lost coverage,
+merged, split, or aged out must **not** 404 — every one of those is a case this
+endpoint exists to answer.
 
 ## POST /api/ingest
 
@@ -124,8 +232,13 @@ Every non-2xx uses this envelope, with no exceptions:
 | Status | `code` | When |
 |---|---|---|
 | 422 | `INVALID_PARAM` | Unparseable parameter (not out-of-range — those clamp) |
+| 404 | `NOT_FOUND` | A named resource does not exist. Currently only `GET /api/stories/{id}`. |
 | 503 | `NO_DATA` | Database is empty; ingest has never run |
 | 500 | `INTERNAL` | Anything else. Never leak a stack trace into `message`. |
+
+`NOT_FOUND` is new in v1.1. The backend was already returning it for unrouted
+paths while v1's table did not list it, so this documents behaviour that
+existed rather than introducing it.
 
 The frontend must handle 503 `NO_DATA` as a first-class empty state with a
 "Run ingest" affordance, not as a crash. On a cold clone that is the **first**

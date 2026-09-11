@@ -15,14 +15,20 @@ prefer the approach that makes the multi-agent workflow legible.
 This directory was previously called `agent-workspace`; that was a placeholder
 before the project had an identity. The two are now one thing.
 
-## Current state (2026-09-10)
+## Current state (2026-09-11)
 
 Slice 1 is **built, integrated, reviewed, and pushed** — verified running end to
 end in a browser: 46 clusters from 524 articles across 18 live feeds.
 
+Slice 1.1 — **durable story ids** — is built and integrated. Verified against the
+project's real 628-article database, not just fixtures: a story that gained new
+coverage went 9 → 10 articles and kept its id, and 503 of 503 ids survived a
+re-run. The backend suite is 40 tests.
+
 ```
 frontend/   Next.js 15, TypeScript, Tailwind, App Router, src/ dir
 backend/    FastAPI + SQLite, feedparser, sentence-transformers
+            app/tracking.py ← story identity: pure, DB-free, unit-testable
 docs/       api-contract.md  ← the frozen interface both halves were built against
 ```
 
@@ -51,7 +57,14 @@ Frontend mocks work without the backend:
 
 Ingest → embed (`all-MiniLM-L6-v2`, CPU) → average-linkage agglomerative
 clustering over cosine distance at **threshold 0.62** → bias-tag by outlet →
-SQLite → API → coverage-spread UI.
+**match the resulting anonymous groups to durable story ids** → SQLite → API →
+coverage-spread UI.
+
+**Identity is separate from composition.** Clustering produces anonymous groups;
+`app/tracking.py` matches each against the previous run's stories by article
+overlap and inherits an id where the match is good enough. Story ids are UUIDs
+derived from nothing, so content changing cannot invalidate them. See "Story
+identity" below.
 
 **The clustering is the hard part, not the summarization.** Recognizing that a
 Guardian headline and a National Review headline describe the same event — often
@@ -68,36 +81,66 @@ show. Below 0.58 clusters become topics rather than events.
 
 ## Known issues
 
-- **Cluster IDs are not stable across re-ingests.** `cluster_id()` in
-  `backend/app/pipeline.py` is a SHA1 of the sorted member article IDs, and
-  `recluster()` rebuilds everything each run. Any membership change yields an
-  unrelated ID, so shared story URLs die. The frontend handles the symptom
-  gracefully. **Fix without a contract change:** match new clusters to the
-  previous run's by article overlap and inherit the ID when overlap is high
-  enough. No test covers ID stability.
-- **The `left` end of the spectrum is thin.** HuffPost's front-page feed returns
-  200 with zero items — empty upstream. `huffpost.com/section/politics/feed`
-  works but is politics-only, which is methodologically inconsistent with the
-  general-news feeds everywhere else. Until resolved, `left` is Vox alone, which
-  undercuts the product's balance claim. Awaiting the user's editorial decision.
+- **HuffPost's feed is politics-only.** Its front-page feed returned 200 with
+  zero items (empty upstream), so the registry now uses
+  `huffpost.com/section/politics/feed`. That is methodologically inconsistent
+  with the general-news feeds everywhere else, so HuffPost's contribution to the
+  corpus is narrower than its peers. Salon was added alongside it so `left` is
+  not one outlet; the registry is now 8 left-ish / 5 center / 8 right-ish.
 - **Newsmax times out** intermittently (rate limiting); costs ~30s per ingest.
 - **One known-bad cluster:** a Missouri cluster merges three distinct legal
   events. Threshold tuning does not fix it — it needs entity/date awareness.
 - **The frontend has no test infrastructure at all.** No runner, no scripts, no
-  test files.
-- **404 uses code `NOT_FOUND`**, outside the contract's enumerated codes.
+  test files. Deliberately deferred again in slice 1.1 to keep that slice to one
+  thing; it is the strongest candidate for the next one.
+
+## Story identity (slice 1.1)
+
+A story is a durable entity whose coverage changes over time. Ids are UUIDs
+(`s_` + 12 hex) derived from **nothing** — an id with no relationship to content
+cannot be invalidated by content changing. The v1 scheme hashed membership,
+which is content-addressing applied to a mutable entity: the id churned in
+proportion to how much coverage a story gained, so it failed hardest on exactly
+the wide-spectrum stories the product exists to show.
+
+Each run, `tracking.match_groups_to_stories()` scores every (new group, existing
+story) pair and assigns greedily, best first, each side usable once:
+
+- **Containment, not Jaccard.** `overlap / min(|A|,|B|)`. Jaccard punishes
+  growth — a 2-article story growing to 5 scores 0.4 and would fail any sane
+  threshold, breaking the id for the exact reason the fix exists. Containment
+  scores it 1.0. Threshold 0.5, `NEWSPRISM_ID_CONTAINMENT_THRESHOLD`.
+- **Sort by overlap *before* containment.** Load-bearing, not cosmetic: every
+  overlap-of-1 pair scores containment 1.0, so containment-first lets a stray
+  article outrank a genuine ancestor and steal its id.
+- Greedy assignment gives merge and split for free — the larger side wins the id
+  in both, ties to the older — rather than needing special cases.
+- Stories are matched on their membership **restricted to the clustering
+  window**, since a new group only ever holds in-window articles.
+
+**Membership is cumulative; the 4-day window only gates clustering.** Articles
+are never deleted, so a story keeps every article it ever had. `archived` means
+none of its articles are still in the window: it leaves the list but stays fully
+renderable, which is what makes an old link work rather than 404. A merge loser
+becomes a permanent alias, chains flattened, resolved with a depth cap.
 
 ## The contract
 
 `docs/api-contract.md` is the interface the frontend and backend agents were
 built against in parallel, without seeing each other's work. It is **frozen** —
-agents may not change it unilaterally; unworkable means stop and report.
+agents may not change it unilaterally; unworkable means stop and report. The
+Architect owns amendments; agents are read-only on `docs/`.
 
 QA confirmed the two halves matched exactly. The contract's one failure was an
 **omission**, not a contradiction: it never specified ID stability or a
 `GET /api/stories/{id}` lookup, so both agents built correctly around a gap.
 Contracts fail this way far more often than by conflict — when amending it, look
 for what it doesn't say.
+
+**v1.1 closed that gap** — ID stability, `GET /api/stories/{id}`, an `archived`
+flag, and `404 NOT_FOUND` (which the backend was already returning while v1's
+table didn't list it). Worth noting for the next amendment: the gap was found by
+asking what the document *failed to say*, not by finding anything wrong in it.
 
 ## Agent roster
 
@@ -128,7 +171,16 @@ Acting as Architect:
 - **Dispatch the parallel pair in a single message**, or they run in sequence
   and you pay the coordination cost for none of the speed.
 - **Verify reports rather than trusting them.** Agents have been accurate here,
-  but the Architect integrates and confirms.
+  but the Architect integrates and confirms. Slice 1.1 is the worked example:
+  both agents reported success honestly and both were right about their own
+  tests, yet the backend's migration failed on every real database. Its v1
+  fixture omitted `idx_articles_cluster`, and SQLite refuses to drop a column an
+  index still references — so it tested a database no user has, and logged a
+  confidently wrong cause. **Test fixtures that simplify the thing they stand in
+  for are where agent work fails silently.** Verify against real data, and be
+  ready to find your own check is the thing that's wrong: the first integration
+  run here reported FAIL because the Architect's test couldn't tell a correct
+  split from a broken id.
 - **Don't write feature code.** That defeats the exercise.
 - **Report honestly to the user, including agent failures.** They're learning
   what this workflow actually costs.
@@ -181,9 +233,9 @@ Python backend, and Render instead of Vercel.
 
 ## Open decisions
 
-- **HuffPost feed** — swap to politics-only, add another left outlet, or both.
-- **Next slice** — stabilize cluster IDs (recommended), frontend tests +
-  GitHub Actions, or LLM synthesis.
+- **Next slice** — frontend tests + GitHub Actions (recommended; the frontend
+  has had zero test infrastructure across two slices now), deployment to Render,
+  or LLM synthesis.
 - **Synthesis LLM** — hosted API (~1¢/call, better at nuance) vs local small
   model (free, slow on CPU, weaker). Needed before the synthesis feature.
 - **Synthesis framing.** The user wants a "neutral take." Recommended instead:

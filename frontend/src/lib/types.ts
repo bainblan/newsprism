@@ -42,6 +42,13 @@ export interface Story {
   summary: string;
   /** ISO 8601 UTC, trailing Z. */
   updated_at: string;
+  /**
+   * Always present, per v1.1. Always `false` on the list response — the list
+   * only ever returns stories inside the clustering window. `true` is only
+   * possible from GET /api/stories/{id}, where it means the story's articles
+   * have aged out but the story itself is still fully renderable.
+   */
+  archived: boolean;
   article_count: number;
   /** Always all five keys. sum(coverage) === article_count. */
   coverage: Coverage;
@@ -55,6 +62,18 @@ export interface StoriesResponse {
   generated_at: string;
   /** May be empty. That is valid, not an error. */
   stories: Story[];
+}
+
+/**
+ * GET /api/stories/{id} 200. Enveloped rather than a bare Story so the wire
+ * shape has room to grow without becoming ambiguous with a bare object.
+ *
+ * `story.id` may differ from the id that was requested: a retired id resolves
+ * transparently to its surviving story, and the canonical id is whatever comes
+ * back here, not whatever was in the URL.
+ */
+export interface StoryLookupResponse {
+  story: Story;
 }
 
 /** POST /api/ingest 200 */
@@ -82,7 +101,7 @@ export interface OutletsResponse {
 }
 
 /** Documented error codes. The backend may in principle send others. */
-export type ApiErrorCode = "INVALID_PARAM" | "NO_DATA" | "INTERNAL";
+export type ApiErrorCode = "INVALID_PARAM" | "NO_DATA" | "NOT_FOUND" | "INTERNAL";
 
 /** The error envelope used by every non-2xx response, with no exceptions. */
 export interface ApiErrorEnvelope {

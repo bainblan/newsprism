@@ -17,6 +17,8 @@ import type {
   IngestResult,
   OutletsResponse,
   StoriesResponse,
+  Story,
+  StoryLookupResponse,
 } from "./types";
 
 /**
@@ -52,6 +54,11 @@ export class ApiError extends Error {
   /** True for the 503 NO_DATA case, which is an empty state and not a failure. */
   get isNoData(): boolean {
     return this.kind === "api" && this.code === "NO_DATA";
+  }
+
+  /** True for the 404 NOT_FOUND case: an id that was never issued or was removed. */
+  get isNotFound(): boolean {
+    return this.kind === "api" && this.code === "NOT_FOUND";
   }
 }
 
@@ -182,6 +189,29 @@ export async function fetchStories(
   if (minSources !== undefined) params.min_sources = minSources;
 
   return request<StoriesResponse>("/api/stories", { params, signal });
+}
+
+/**
+ * GET /api/stories/{id}. The rescue path for a story the list can't answer
+ * for: aged out (`archived: true`), past the list's `limit`, or retired into
+ * a surviving story (`story.id` in the result differs from `id`). Call sites
+ * are responsible for noticing that mismatch and reconciling the URL — this
+ * function just resolves whatever id it's given and hands back the story.
+ */
+export async function fetchStory(
+  id: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<Story> {
+  if (USE_MOCK_DATA) {
+    const { mockFetchStory } = await import("./mock/mock-api");
+    return mockFetchStory(id);
+  }
+
+  const { story } = await request<StoryLookupResponse>(
+    `/api/stories/${encodeURIComponent(id)}`,
+    { signal: options.signal },
+  );
+  return story;
 }
 
 export async function runIngest(
