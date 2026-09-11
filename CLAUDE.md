@@ -109,6 +109,14 @@ passes on a dev machine with a warm `.next/` and fails on a fresh checkout. This
 was written wrong the first time and caught before CI ever ran, by type-checking
 with the generated inputs excluded rather than by trusting a local green.
 
+**CI's first real run failed, and the failure was in the workflow, not the
+code.** Backend collection died with `ModuleNotFoundError: No module named
+'app'`. Cause: `python -m pytest` puts the CWD on `sys.path` and bare `pytest`
+does not — the suite had only ever been run locally the first way and CI ran it
+the second. Fixed with `pythonpath = .` in `backend/pytest.ini`, so either
+invocation works, rather than by pinning the workflow to one spelling. Both
+spellings are now worth running before trusting a local green.
+
 **Tests were verified by mutation, not by watching them pass.** Five deliberate
 regressions were introduced one at a time and each had to fail the suite:
 renaming the `min_sources` wire param, flipping `router.replace` to `push`,
@@ -133,11 +141,11 @@ tests fail on every redesign and catch nothing.
 - **Newsmax times out** intermittently (rate limiting); costs ~30s per ingest.
 - **One known-bad cluster:** a Missouri cluster merges three distinct legal
   events. Threshold tuning does not fix it — it needs entity/date awareness.
-- **CI has never run on a real runner.** The workflow is written and every
-  command in it passes locally, but nothing has been pushed, so the first
-  GitHub Actions run is still an unverified step. The backend job installs the
-  full ~1 GB pinned dependency set; expect the first run to be slow and the
-  pip cache to make later ones cheap.
+- **The backend job installs the full ~1 GB pinned dependency set** (torch and
+  sentence-transformers included, though the suite forces
+  `NEWSPRISM_CLUSTERER=tfidf` and never imports them). Deliberate: a convenient
+  subset would test a dependency set no user and no deployment has. The first
+  run took ~1 min to install; the pip cache makes later ones cheap.
 
 ## Story identity (slice 1.1)
 
