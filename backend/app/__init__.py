@@ -1,0 +1,1 @@
+"""newsprism backend application package."""
