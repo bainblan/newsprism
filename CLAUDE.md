@@ -280,7 +280,7 @@ Acting as Architect:
 | git | 2.51.0.windows.1 |
 | gh | 2.100.0 — authed as `bainblan` |
 | vercel | 59.15.1 — authed as `bainblan` |
-| Docker | **not installed** — needed before containerizing |
+| Docker | **not installed** — `backend/Dockerfile` exists but has never been built or run locally |
 
 - Windows 11. PowerShell 5.1 is primary; Git Bash also available. Different
   syntax — PowerShell has no `&&`, no ternary, no `??`. Don't mix them.
@@ -301,13 +301,43 @@ If the public resolver answers, the deploy is fine. `ipconfig /flushdns` does no
 help. This once cost several rounds of chasing Vercel settings for a DNS
 problem — don't repeat it.
 
-## Deployment plan (not yet done)
+## Deployment (blueprint written, not yet deployed)
 
-**Render, not Vercel.** The backend's ~1 GB of dependencies exceeds Vercel's
-function limits, SQLite needs a persistent filesystem, and model weights need a
-long-lived process. Render gives Docker, persistent disks, and always-on
-services — and `onrender.com` resolves on campus. Leaning toward both halves on
-Render for one coherent deploy story.
+`render.yaml` and `backend/Dockerfile` are committed. `docs/deploy.md` is the
+runbook. Nothing has been created in Render yet — that step needs the account.
+
+| service | type | plan | notes |
+|---|---|---|---|
+| `newsprism-api` | web (Docker) | `0.5c-512mb` | 1 GB disk at `/data` |
+| `newsprism-web` | web (Node) | `free` | sleeps after 15 min idle |
+| `newsprism-ingest` | cron | `0.5c-512mb` | `curl`s the API every 6 hours |
+
+**Render, not Vercel.** SQLite needs a persistent filesystem and the ONNX
+session needs a long-lived process; neither survives a serverless function. And
+`onrender.com` resolves on campus.
+
+The API fits `0.5c-512mb` only because of slice 1.3 — 355 MB peak with 31%
+headroom. The original ~1 GB torch install is also why the dependency size
+argument against Vercel is now weaker than it was; the filesystem and
+process-lifetime arguments are the ones that still hold.
+
+Decisions worth remembering:
+
+- **The model is baked into the image at build**, and the build asserts the
+  constructed clusterer is `OnnxClusterer`. A first-ingest download failure
+  would otherwise degrade to TF-IDF, which still renders a page — just without
+  the coverage spread the product exists to show. Silent degradation is the
+  failure mode worth spending a build step on.
+- **`/api/health` cannot detect that fallback**: it reports the *configured*
+  clusterer from the environment, not the one actually constructed. Read the
+  ingest log line (`... using onnx:all-MiniLM-L6-v2`) instead. Worth fixing.
+- **The frontend must be rebuilt, not restarted, when `NEXT_PUBLIC_API_URL`
+  changes** — Next inlines it at build time.
+- **Two env vars can't be auto-wired.** `fromService` exposes only private
+  hostnames; the browser needs public URLs. The cron job avoids this by using
+  the private network, since its client isn't a browser.
+- **The Dockerfile has never been built locally** — Docker is still not
+  installed here, so Render's build is its first real test.
 
 ## Bootstrap skill
 
