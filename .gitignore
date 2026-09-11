@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Local data — never commit scraped content or model caches
+*.db
+*.sqlite
+*.sqlite3
+data/
+.cache/
+models/
+
+# Environment — repo is PUBLIC, keep these out
+.env
+.env.*
+!.env.example
+
+# Node (frontend/ has its own .gitignore too)
+node_modules/
+.next/
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
