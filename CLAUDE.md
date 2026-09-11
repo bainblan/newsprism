@@ -25,11 +25,19 @@ project's real 628-article database, not just fixtures: a story that gained new
 coverage went 9 → 10 articles and kept its id, and 503 of 503 ids survived a
 re-run. The backend suite is 40 tests.
 
+Slice 1.2 — **frontend tests + CI** — is built and reviewed. The frontend went
+from zero test infrastructure to **68 tests** (Vitest + React Testing Library),
+and both halves now run in GitHub Actions. Not yet observed on a real runner:
+the workflow has never been pushed. See "Testing and CI" below.
+
 ```
-frontend/   Next.js 15, TypeScript, Tailwind, App Router, src/ dir
+frontend/   Next.js 16, TypeScript, Tailwind, App Router, src/ dir
+            *.test.ts(x) sit beside what they test; src/test/ holds fixtures
 backend/    FastAPI + SQLite, feedparser, sentence-transformers
             app/tracking.py ← story identity: pure, DB-free, unit-testable
 docs/       api-contract.md  ← the frozen interface both halves were built against
+            testing.md       ← runner choice, script contract, what's worth testing
+.github/    workflows/ci.yml ← frontend + backend as parallel jobs
 ```
 
 Repo: https://github.com/bainblan/newsprism (public)
@@ -79,6 +87,41 @@ the last point before the product's premise degrades: at 0.66 the flagship story
 lost its Guardian, BBC, and Al Jazeera coverage — the spread the page exists to
 show. Below 0.58 clusters become topics rather than events.
 
+## Testing and CI (slice 1.2)
+
+`docs/testing.md` is the spec: runner choice, the script contract, and the
+ranked list of what is worth testing. Architect-owned, like the API contract.
+
+| | |
+|---|---|
+| backend | 40 tests, `pytest`, offline against a temp SQLite file |
+| frontend | 68 tests, Vitest + React Testing Library + jsdom |
+| CI | `.github/workflows/ci.yml`, two parallel jobs |
+
+From `frontend/`: `npm run test` (watch), `test:run` (CI), `typecheck`, `lint`.
+CI runs lint → typecheck → test → build, with build last because a broken build
+is the least informative failure.
+
+**`typecheck` is `next typegen && tsc --noEmit`, and the typegen half is
+load-bearing.** `PageProps` and `LayoutProps` are globals Next *generates* into
+`.next/types/` and `next-env.d.ts` — both gitignored. A bare `tsc --noEmit`
+passes on a dev machine with a warm `.next/` and fails on a fresh checkout. This
+was written wrong the first time and caught before CI ever ran, by type-checking
+with the generated inputs excluded rather than by trusting a local green.
+
+**Tests were verified by mutation, not by watching them pass.** Five deliberate
+regressions were introduced one at a time and each had to fail the suite:
+renaming the `min_sources` wire param, flipping `router.replace` to `push`,
+moving `ONE_SIDED_THRESHOLD` 0.8 → 0.9, and removing each of the two async
+staleness guards (`requestSeq` in the provider, `resolvedDetail` in the detail
+page). A suite that has never been shown to fail is not yet evidence of
+anything — this is the cheapest way to find out whether it has teeth.
+
+Known gaps, all deliberate: the `TIMEOUT` branch in `api.ts` (needs real
+`AbortSignal.timeout` expiry), the `USE_MOCK_DATA` branch, and end-to-end tests
+entirely. Do not assert on Tailwind classes or `LEAN_META` label strings — those
+tests fail on every redesign and catch nothing.
+
 ## Known issues
 
 - **HuffPost's feed is politics-only.** Its front-page feed returned 200 with
@@ -90,9 +133,11 @@ show. Below 0.58 clusters become topics rather than events.
 - **Newsmax times out** intermittently (rate limiting); costs ~30s per ingest.
 - **One known-bad cluster:** a Missouri cluster merges three distinct legal
   events. Threshold tuning does not fix it — it needs entity/date awareness.
-- **The frontend has no test infrastructure at all.** No runner, no scripts, no
-  test files. Deliberately deferred again in slice 1.1 to keep that slice to one
-  thing; it is the strongest candidate for the next one.
+- **CI has never run on a real runner.** The workflow is written and every
+  command in it passes locally, but nothing has been pushed, so the first
+  GitHub Actions run is still an unverified step. The backend job installs the
+  full ~1 GB pinned dependency set; expect the first run to be slow and the
+  pip cache to make later ones cheap.
 
 ## Story identity (slice 1.1)
 
@@ -233,9 +278,13 @@ Python backend, and Render instead of Vercel.
 
 ## Open decisions
 
-- **Next slice** — frontend tests + GitHub Actions (recommended; the frontend
-  has had zero test infrastructure across two slices now), deployment to Render,
-  or LLM synthesis.
+- **Next slice** — deployment to Render (recommended; it is now the only
+  infrastructure gap left, and CI already proves the Linux dependency pins
+  resolve) or LLM synthesis. Frontend tests are done as of slice 1.2.
+- **End-to-end tests** — deliberately out of scope in slice 1.2, which covered
+  units and components only. Playwright against a running backend is the
+  obvious next increment, and it is a real decision with a real CI cost rather
+  than an afterthought.
 - **Synthesis LLM** — hosted API (~1¢/call, better at nuance) vs local small
   model (free, slow on CPU, weaker). Needed before the synthesis feature.
 - **Synthesis framing.** The user wants a "neutral take." Recommended instead:

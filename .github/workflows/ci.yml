@@ -1,0 +1,91 @@
+# CI for both halves of newsprism.
+#
+# The two jobs are independent and run in parallel — a frontend typo should not
+# hide a backend failure, and the summary should say which half broke.
+#
+# The frontend job invokes the script names fixed in docs/testing.md. Those
+# names were chosen before the tests existed so this file and the test slice
+# could be written at the same time; renaming a script breaks CI.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push supersedes the run in flight for the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches the developer machine (v22.19.0); Next 16 requires >= 20.9.
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # ci, not install: fails on a lockfile that disagrees with package.json
+      # rather than quietly resolving something newer than what was reviewed.
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit and component tests
+        run: npm run test:run
+
+      # Last, and deliberately not first: a broken build is the least
+      # informative failure, so let the targeted checks report before it.
+      - name: Build
+        run: npm run build
+
+  backend:
+    name: backend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+
+      # The FULL pinned dependency set, torch and sentence-transformers
+      # included, even though the suite forces NEWSPRISM_CLUSTERER=tfidf and
+      # never imports them. Installing a convenient subset would test a
+      # dependency set no user and no deployment has — and this is the first
+      # thing in the project that proves the Linux pins resolve at all, which
+      # the Render deploy depends on. requirements.txt already points torch at
+      # the CPU index, so no CUDA build is fetched. pip cache makes repeat
+      # runs cheap.
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      # No network: every test runs against a temp SQLite file with synthetic
+      # articles. No feed is fetched and no model is downloaded.
+      - name: Tests
+        run: pytest -q
