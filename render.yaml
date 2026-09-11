@@ -1,0 +1,106 @@
+# newsprism on Render — both halves plus scheduled ingest.
+#
+# Render, not Vercel: the backend needs a persistent filesystem for SQLite and
+# a long-lived process holding an ONNX session, neither of which a serverless
+# function gives you. `onrender.com` also resolves on the UGA campus network,
+# where every `*.vercel.app` subdomain returns NXDOMAIN (see CLAUDE.md).
+#
+# Two env vars cannot be wired automatically and are marked `sync: false`.
+# Render's `fromService` exposes only PRIVATE network hostnames, and both of
+# these need the PUBLIC `onrender.com` URL — the browser is the client in one
+# case and the CORS allow-list is compared against a browser Origin in the
+# other. They are filled in after the first deploy; see docs/deploy.md.
+
+services:
+  # --- API -----------------------------------------------------------------
+  # 0.5c-512mb is affordable because slice 1.3 replaced torch with onnxruntime:
+  # peak RSS through the real ingest path is 355 MB, leaving ~31% headroom.
+  # Before that it was 692 MB and this plan was not an option.
+  - name: newsprism-api
+    type: web
+    runtime: docker
+    plan: 0.5c-512mb
+    region: virginia
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /api/health
+
+    # SQLite needs a real filesystem that survives deploys. 1 GB is enormous
+    # for this: the database is ~1.3 MB after 997 articles. Disks can only be
+    # grown, never shrunk, so starting small is the reversible choice.
+    #
+    # Attaching a disk means no zero-downtime deploys — Render stops the old
+    # instance before starting the new one, to keep two versions from writing
+    # the same file. A few seconds of downtime per deploy is the right trade
+    # for not corrupting the database.
+    disk:
+      name: newsprism-data
+      mountPath: /data
+      sizeGB: 1
+
+    envVars:
+      - key: NEWSPRISM_DB_PATH
+        value: /data/newsprism.db
+      - key: NEWSPRISM_CLUSTERER
+        value: onnx
+      # The public URL of newsprism-web, e.g. https://newsprism-web.onrender.com
+      # Compared against the browser's Origin header, so it must be the public
+      # origin with scheme and no trailing slash.
+      - key: NEWSPRISM_CORS_ORIGINS
+        sync: false
+
+  # --- Frontend ------------------------------------------------------------
+  # Free is fine here: no disk, low memory, and all data fetching is
+  # client-side. It sleeps after 15 minutes idle and takes ~1 min to wake.
+  - name: newsprism-web
+    type: web
+    runtime: node
+    plan: free
+    region: virginia
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # The public URL of newsprism-api, e.g. https://newsprism-api.onrender.com
+      #
+      # NEXT_PUBLIC_* is inlined into the client bundle at BUILD time, not read
+      # at runtime. Changing this value therefore requires a rebuild, not a
+      # restart — setting it and restarting leaves the old URL compiled into
+      # the JavaScript. See docs/deploy.md.
+      - key: NEXT_PUBLIC_API_URL
+        sync: false
+
+  # --- Scheduled ingest ----------------------------------------------------
+  # A disk cannot be attached to a cron job, so this cannot write the database
+  # directly. It calls the API instead, which is the right shape anyway: one
+  # process owns the SQLite file.
+  #
+  # Reaches the API over the PRIVATE network (plain http, host:port) rather
+  # than the public URL — no manual configuration, no public bandwidth, and
+  # the ingest endpoint stays off the open internet for this path. Private
+  # networking requires a paid plan on the receiving service, which
+  # newsprism-api is.
+  #
+  # --max-time 3600 because ingest is synchronous by contract and runs on half
+  # a CPU: expect several minutes, not the 64s measured on a dev machine.
+  # Render allows up to 100 minutes for an HTTP response, so the timeout here
+  # is the binding one. -f makes an HTTP error a failed job rather than a
+  # silent success.
+  - name: newsprism-ingest
+    type: cron
+    runtime: image
+    plan: 0.5c-512mb
+    region: virginia
+    schedule: "17 */6 * * *"
+    image:
+      url: docker.io/curlimages/curl:8.22.0
+    dockerCommand: >-
+      curl -fsS --max-time 3600 -X POST "http://$INGEST_TARGET/api/ingest"
+    envVars:
+      - key: INGEST_TARGET
+        fromService:
+          name: newsprism-api
+          type: web
+          property: hostport

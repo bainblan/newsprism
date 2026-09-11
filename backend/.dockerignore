@@ -1,0 +1,38 @@
+# The build context is backend/ (see render.yaml). Everything listed here is
+# either large, machine-specific, or reproducible — sending it to the builder
+# only slows the deploy down.
+
+# ~1 GB of Windows wheels, and wrong for a Linux image regardless.
+.venv/
+venv/
+
+# Scraped content and model caches. The deployed DB lives on the Render disk
+# at /data, not in the image; baking a local one in would ship stale articles
+# and quietly overwrite nothing useful.
+data/
+.cache/
+models/
+*.db
+*.sqlite
+*.sqlite3
+
+# Never: the repo is public and the image is not the place for local config.
+.env
+.env.*
+!.env.example
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Tests do not run in the image. CI runs them against the same
+# requirements.txt on a real Linux runner, which is the point of that job.
+tests/
+pytest.ini
+requirements-dev.txt
+
+# The torch reference path is deliberately not installed in the image.
+requirements-torch.txt
+
+README.md
