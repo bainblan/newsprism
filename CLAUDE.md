@@ -15,7 +15,11 @@ prefer the approach that makes the multi-agent workflow legible.
 This directory was previously called `agent-workspace`; that was a placeholder
 before the project had an identity. The two are now one thing.
 
-## Current state (2026-09-11)
+## Current state (2026-09-12)
+
+**newsprism is deployed and live.** All three Render services are up and the
+product has been verified end to end in production, not just locally — see
+"Deployment" below for the URLs and what the first deploy actually cost.
 
 Slice 1 is **built, integrated, reviewed, and pushed** — verified running end to
 end in a browser: 46 clusters from 524 articles across 18 live feeds.
@@ -27,8 +31,8 @@ re-run. The backend suite is 40 tests.
 
 Slice 1.2 — **frontend tests + CI** — is built and reviewed. The frontend went
 from zero test infrastructure to **68 tests** (Vitest + React Testing Library),
-and both halves now run in GitHub Actions. Not yet observed on a real runner:
-the workflow has never been pushed. See "Testing and CI" below.
+and both halves now run in GitHub Actions. It has since run on a real runner,
+failed on a workflow bug, and been fixed. See "Testing and CI" below.
 
 Slice 1.3 — **ONNX embedding backend** — is built, reviewed, and verified. torch
 and sentence-transformers are gone from the default install; the same model runs
@@ -49,7 +53,11 @@ backend/    FastAPI + SQLite, feedparser, onnxruntime
 docs/       api-contract.md  ← the frozen interface both halves were built against
             testing.md       ← runner choice, script contract, what's worth testing
             onnx-migration.md ← slice 1.3 spec, measured costs, equivalence proof
+            deploy.md        ← the Render runbook
 .github/    workflows/ci.yml ← frontend + backend as parallel jobs
+.claude/    skills/run-newsprism/ ← driver.mjs + SKILL.md: launches both halves,
+            drives the real UI over CDP, screenshots. Zero npm deps.
+render.yaml ← the blueprint all three live services were created from
 ```
 
 Repo: https://github.com/bainblan/newsprism (public)
@@ -72,6 +80,26 @@ and slice 1 has no secrets.
 
 Frontend mocks work without the backend:
 `NEXT_PUBLIC_USE_MOCK_DATA=true`, `NEXT_PUBLIC_MOCK_SCENARIO=no_data|stories|empty|error|offline`.
+
+**Don't start with `npm run dev` — start with the driver.** The `run-newsprism`
+skill (`.claude/skills/run-newsprism/`) launches both halves, waits on them
+properly, drives the real UI over the Chrome DevTools Protocol, and tears it all
+down. It exists because an agent could read the README and still not be able to
+*see* the app.
+
+```bash
+node .claude/skills/run-newsprism/driver.mjs doctor   # prerequisites
+node .claude/skills/run-newsprism/driver.mjs smoke    # both halves + click into a story
+node .claude/skills/run-newsprism/driver.mjs shot <url> out.png
+```
+
+Zero npm dependencies — Node 22 ships global `fetch` and `WebSocket`, and it
+speaks CDP to the already-installed Chrome rather than pulling in Playwright.
+`shot` takes any URL, so it screenshots **production** as readily as localhost;
+that is how the live deploy was verified. Read `SKILL.md` before using it — it
+documents five failure modes no README would tell you, including that Next 16
+refuses a second dev server for the same project dir on *any* port, and that
+`127.0.0.1:3000` yields skeletons where `localhost:3000` yields stories.
 
 ## How it works
 
@@ -280,7 +308,7 @@ Acting as Architect:
 | git | 2.51.0.windows.1 |
 | gh | 2.100.0 — authed as `bainblan` |
 | vercel | 59.15.1 — authed as `bainblan` |
-| Docker | **not installed** — `backend/Dockerfile` exists but has never been built or run locally |
+| Docker | **not installed locally** — `backend/Dockerfile` has still never been built here, but Render built it successfully on the first try |
 
 - Windows 11. PowerShell 5.1 is primary; Git Bash also available. Different
   syntax — PowerShell has no `&&`, no ternary, no `??`. Don't mix them.
@@ -301,16 +329,27 @@ If the public resolver answers, the deploy is fine. `ipconfig /flushdns` does no
 help. This once cost several rounds of chasing Vercel settings for a DNS
 problem — don't repeat it.
 
-## Deployment (blueprint written, not yet deployed)
+## Deployment (live on Render since 2026-09-12)
 
-`render.yaml` and `backend/Dockerfile` are committed. `docs/deploy.md` is the
-runbook. Nothing has been created in Render yet — that step needs the account.
+`render.yaml` and `backend/Dockerfile` are committed; `docs/deploy.md` is the
+runbook. All three services were created from the blueprint and are running.
 
-| service | type | plan | notes |
+| service | type | plan | URL / notes |
 |---|---|---|---|
-| `newsprism-api` | web (Docker) | `0.5c-512mb` | 1 GB disk at `/data` |
-| `newsprism-web` | web (Node) | `free` | sleeps after 15 min idle |
+| `newsprism-api` | web (Docker) | `0.5c-512mb` | **https://newsprism-api-7651.onrender.com** — 1 GB disk at `/data` |
+| `newsprism-web` | web (Node) | `free` | **https://newsprism-web.onrender.com** — sleeps after 15 min idle |
 | `newsprism-ingest` | cron | `0.5c-512mb` | `curl`s the API every 6 hours |
+
+**The API hostname is `newsprism-api-7651`, not `newsprism-api`.** The name was
+already taken globally, so Render appended a suffix. This matters more than a
+cosmetic rename, because `newsprism-api.onrender.com` **resolves and answers**:
+it belongs to an unrelated project also called NewsPrism ("Global News
+Observatory", GraphQL at `/graphql`, REST at `/health`). It is FastAPI too, so
+it returns `x-render-origin-server: uvicorn` and a plausible
+`{"detail":"Not Found"}` on `/api/health`. Every instinct says "my deploy is
+broken"; nothing is broken, you are reading a stranger's server. **The tell is
+the error envelope** — ours is `{"error":{"code":"NOT_FOUND",...}}`, never
+`{"detail":...}`. Guessed Render URLs are not safe; read the dashboard.
 
 **Render, not Vercel.** SQLite needs a persistent filesystem and the ONNX
 session needs a long-lived process; neither survives a serverless function. And
@@ -331,13 +370,42 @@ Decisions worth remembering:
 - **`/api/health` cannot detect that fallback**: it reports the *configured*
   clusterer from the environment, not the one actually constructed. Read the
   ingest log line (`... using onnx:all-MiniLM-L6-v2`) instead. Worth fixing.
+  **From outside the box, count multi-source clusters instead** —
+  `/api/stories?min_sources=2&limit=100`. Embeddings give ~50–59, TF-IDF gives
+  9, so the two are never ambiguous. The production deploy returned **51**, and
+  its top story clustered 8 outlets across 4 lean buckets under headlines
+  sharing almost no vocabulary ("calls for AI development slowdown" / "pitches
+  AI slow-down plan"), which is the thing TF-IDF provably cannot do.
 - **The frontend must be rebuilt, not restarted, when `NEXT_PUBLIC_API_URL`
-  changes** — Next inlines it at build time.
+  changes** — Next inlines it at build time. This was observed, not theorized:
+  the first live bundle shipped with `http://localhost:8000` compiled in and
+  only picked up the real API after **Manual Deploy → Clear build cache &
+  deploy**. To check it from outside, grep the served chunks:
+  `curl -s <web>/ | grep -o '/_next/static/chunks/[^"]*\.js'`, then grep those
+  for `onrender.com`. The compiled bundle is the only thing that tells the
+  truth; the dashboard will happily show the new value next to a stale build.
+- **`NEWSPRISM_CORS_ORIGINS` must be the exact browser origin, no trailing
+  slash.** `_env_list` splits on commas and strips whitespace but **not**
+  slashes, and Starlette compares `Origin` byte-for-byte, so
+  `https://newsprism-web.onrender.com/` silently rejects every request.
+  **Diagnose it by control, not by guessing:** send `Origin:
+  http://localhost:3000`. If *that* is allowed, the variable is unset or empty —
+  `localhost:3000` is only ever the hardcoded default in `config.py`. A rejected
+  origin returns `400 Disallowed CORS origin` with no
+  `access-control-allow-origin` header.
 - **Two env vars can't be auto-wired.** `fromService` exposes only private
   hostnames; the browser needs public URLs. The cron job avoids this by using
   the private network, since its client isn't a browser.
-- **The Dockerfile has never been built locally** — Docker is still not
-  installed here, so Render's build is its first real test.
+- **The Dockerfile built correctly on Render's first attempt**, despite never
+  having been built locally — Docker is still not installed here. The budgeted
+  round of build fixes was not needed; CI proving the Linux pins resolve on
+  Python 3.13 appears to have been the thing that de-risked it.
+- **Render's GitHub App is not connected to the repo.** The build log says "it
+  looks like we don't have access to your repo, but we'll try to clone it
+  anyway" and then succeeds, because the repo is public and the clone is
+  anonymous. **The cost is that auto-deploy on push and PR previews don't
+  work** — every deploy is manual until the app is authorized for
+  `bainblan/newsprism`.
 
 ## Bootstrap skill
 
@@ -348,17 +416,19 @@ Python backend, and Render instead of Vercel.
 
 ## Open decisions
 
-- **Next slice** — deployment to Render, **in progress**. Slice 1.3 was pulled in
-  ahead of it because sizing the host revealed the backend needed 692 MB, and
-  renting 2 GB to run a training framework in inference mode was the wrong
-  trade. Now that it fits 512 MB, the deploy is the only infrastructure gap left.
+- **Next slice — genuinely open.** The Render deploy is **done**, which closes
+  the last infrastructure gap; nothing is in progress. The candidates are the
+  four bullets below plus the `/api/health` fix (see "Deployment"), which is the
+  smallest of them and the only one with operational value the moment it lands.
 - **The double encode per ingest** (see "Known issues") — worth a slice on its
   own. The fix is a `Clusterer` protocol change so one pass returns vectors and
   groups together, which touches the seam every clusterer implements.
 - **End-to-end tests** — deliberately out of scope in slice 1.2, which covered
-  units and components only. Playwright against a running backend is the
-  obvious next increment, and it is a real decision with a real CI cost rather
-  than an afterthought.
+  units and components only. **Cheaper now than when it was deferred:**
+  `.claude/skills/run-newsprism/driver.mjs` already launches both halves, drives
+  the real UI, and asserts against the live deploy, so the work is mostly
+  promoting it into `e2e/` and giving it assertions — not adopting Playwright
+  and its CI cost from scratch.
 - **Synthesis LLM** — hosted API (~1¢/call, better at nuance) vs local small
   model (free, slow on CPU, weaker). Needed before the synthesis feature.
 - **Synthesis framing.** The user wants a "neutral take." Recommended instead:
@@ -380,3 +450,7 @@ Python backend, and Render instead of Vercel.
   immediately and permanently.
 - Keep this file current. When something planned becomes real, describe what
   actually exists.
+- **Hard cap: 500 lines.** Every slice wants to add to this file, so adding must
+  cost something. At the cap, earn the space by deleting — the first candidates
+  are narratives of problems that are now fixed and can't recur, which belong in
+  `docs/` or the git history rather than here. Check with `wc -l CLAUDE.md`.
