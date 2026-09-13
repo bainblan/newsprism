@@ -1,4 +1,4 @@
-# API Contract — v1.2 (slice 1 + story lookup + ingest auth)
+# API Contract — v1.3 (slice 1 + story lookup + bounded public ingest)
 
 **Status:** frozen. Neither the frontend nor the backend agent may change this
 unilaterally. If it is unworkable, stop and report to the Architect.
@@ -18,6 +18,15 @@ multi-minute, CPU-bound runs on a half-CPU instance. This is an availability
 problem, not a billing one. v1.2 puts the endpoint behind a shared secret, adds
 `401 UNAUTHORIZED`, and removes the browser from the set of ingest clients. No
 response shape changes.
+
+**Amended 2026-09-12 by the Architect (v1.2 → v1.3).** v1.2 closed the endpoint
+by controlling *who* could call it. That was the wrong axis: a token bounds the
+caller, never the work. Nothing stopped the cron and an operator from ingesting
+**simultaneously**, and two concurrent runs need ~710 MB on a 512 MB instance —
+an OOM that takes the whole site down, with no bad actor involved. v1.3 makes
+the **server** bound the work: one run at a time, and not too often. That is
+what makes a public "Update news" button safe, so the browser becomes an ingest
+client again.
 
 The frontend and backend are built in parallel by agents who cannot see each
 other's work. This document is the only thing keeping the two halves compatible,
@@ -203,28 +212,58 @@ endpoint exists to answer.
 Triggers a fetch-and-cluster run. Synchronous for v1 — it may take 30–60s on a
 dev machine, and several minutes on a half-CPU host.
 
-### Authentication (new in v1.2)
+### Concurrency and rate limiting (new in v1.3)
 
-The request must carry the shared secret in an `X-Ingest-Token` header:
+Two rules, enforced server-side, in this order. They exist for different
+reasons and must not be collapsed into one another.
+
+**1. Cooldown — at most one run per window.** If a run completed less than
+`NEWSPRISM_INGEST_COOLDOWN_SECONDS` ago (default 900 = 15 min), reject with
+`429 INGEST_COOLDOWN` and a `Retry-After` header in seconds. The message must
+say how recently the last run finished, in plain language, because the frontend
+renders it verbatim. This is **policy**: it bounds total work and makes the
+button honest, since feeds barely move in four minutes.
+
+**2. Single-flight lock — never two runs at once.** If a run is already in
+progress, reject immediately with `409 INGEST_IN_PROGRESS`. Do **not** queue,
+wait, or return the in-flight result. This is **physics**: one run peaks at
+355 MB of a 512 MB instance, so a second concurrent run is an out-of-memory
+kill, not a slowdown.
+
+**The lock is absolute. The cooldown is not.** A valid token bypasses the
+cooldown; **nothing bypasses the lock**, including the cron. A token says "I am
+allowed to ask for work more often," never "I am allowed to exhaust the host."
+
+**The lock must be released on every exit path**, including an exception and
+the total-feed-failure 503. A lock leaked on a failure wedges the endpoint
+until the process restarts, which is a worse outage than the one it prevents.
+
+It is per-process, which is correct for a single-instance deployment and
+**silently wrong if the API is ever scaled to more than one instance**. Record
+that here rather than discovering it under load.
+
+### Authentication (amended in v1.3)
+
+The `X-Ingest-Token` header from v1.2 stays, with a narrowed meaning:
 
 ```
 X-Ingest-Token: <value of NEWSPRISM_INGEST_TOKEN>
 ```
 
-- Compare in **constant time**. A missing token and a wrong token are
-  indistinguishable in the response: both are `401 UNAUTHORIZED` with the same
-  message. Never reveal whether a token is configured at all.
-- The check runs **before** any feed fetching or model work, so a rejected
-  request costs no CPU. That is the entire point of the change.
-- **When `NEWSPRISM_INGEST_TOKEN` is unset, the endpoint is open.** That keeps
-  a fresh clone working with zero configuration, and it is the wrong state for
-  a deployment — so it must be visible from outside the box, not only in the
-  source: the app logs a WARNING at startup and `GET /api/health` reports
-  `"ingest_protected": false`.
-- **The browser is not an ingest client.** `NEXT_PUBLIC_*` values are compiled
-  into the JavaScript bundle, so the frontend cannot hold this secret; there is
-  no version of this where a public ingest button and a closed endpoint both
-  exist. The scheduled job and an operator with `curl` are the only callers.
+| request | result |
+|---|---|
+| no header | **allowed**, subject to cooldown + lock |
+| valid token | allowed, **bypasses the cooldown**, still subject to the lock |
+| present but invalid token | `401 UNAUTHORIZED` |
+
+A wrong token must stay a hard 401 rather than degrading to anonymous. The cron
+runs `curl -f`, so a broken token has to surface as a failed job — degrading it
+to "bounded anonymous caller" would let the scheduled ingest quietly turn into
+a no-op and the site would go stale with every dashboard light green.
+
+Compare in constant time. When `NEWSPRISM_INGEST_TOKEN` is unset there is no
+valid token, so every caller is anonymous and bounded; `GET /api/health` still
+reports `ingest_protected`.
 
 **200 response**
 
@@ -263,7 +302,9 @@ Every non-2xx uses this envelope, with no exceptions:
 
 | Status | `code` | When |
 |---|---|---|
-| 401 | `UNAUTHORIZED` | `POST /api/ingest` without a valid `X-Ingest-Token`. |
+| 401 | `UNAUTHORIZED` | `POST /api/ingest` with a present but invalid `X-Ingest-Token`. |
+| 409 | `INGEST_IN_PROGRESS` | An ingest run is already running. Never two at once. |
+| 429 | `INGEST_COOLDOWN` | A run finished too recently. Carries `Retry-After`. |
 | 422 | `INVALID_PARAM` | Unparseable parameter (not out-of-range — those clamp) |
 | 404 | `NOT_FOUND` | A named resource does not exist. Currently only `GET /api/stories/{id}`. |
 | 503 | `NO_DATA` | Database is empty; ingest has never run |
@@ -273,16 +314,17 @@ Every non-2xx uses this envelope, with no exceptions:
 paths while v1's table did not list it, so this documents behaviour that
 existed rather than introducing it.
 
-`UNAUTHORIZED` is new in v1.2 and applies to `POST /api/ingest` only. It is the
-one error code the frontend is not expected to render: the browser no longer
-calls that endpoint.
+`UNAUTHORIZED`, `INGEST_IN_PROGRESS` and `INGEST_COOLDOWN` apply to
+`POST /api/ingest` only. **The frontend must render 409 and 429 as normal,
+expected outcomes, not as failures** — "a refresh is already running" and
+"already up to date" are both good news for the person who clicked. Only
+`UNAUTHORIZED` stays unrenderable, since the browser never sends a token.
 
 The frontend must handle 503 `NO_DATA` as a first-class empty state, not as a
 crash. On a cold clone that is the **first** thing a user sees, so it is not an
-edge case. **Changed in v1.2:** the ingest affordance in that state is now
-conditional on `NEXT_PUBLIC_SHOW_INGEST_CONTROL`, so the empty state must read
-sensibly with no button in it — a deployed instance is refilled on a schedule,
-not by its visitors.
+edge case. **Reversed in v1.3:** the ingest control is public again and
+`NEXT_PUBLIC_SHOW_INGEST_CONTROL` is retired, because the server now bounds the
+work regardless of who clicks or how often.
 
 ## Outlet list (Architect-owned)
 

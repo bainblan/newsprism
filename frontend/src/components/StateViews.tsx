@@ -8,7 +8,7 @@
 
 import { IngestAction } from "@/components/IngestAction";
 import { useStories } from "@/components/StoriesProvider";
-import { SHOW_INGEST_CONTROL, USE_MOCK_DATA } from "@/lib/config";
+import { USE_MOCK_DATA } from "@/lib/config";
 
 function Panel({
   title,
@@ -44,15 +44,13 @@ export function NoDataState({ message }: { message: string }) {
         been ingested yet, so there is nothing to show.
       </p>
       <p>
-        {SHOW_INGEST_CONTROL
-          ? "An ingest run takes roughly 30 to 60 seconds, because it is waiting on the news sites rather than on anything local."
-          : "This refills on its own roughly every six hours — check back shortly and stories will appear once the next run completes."}
+        This refills on its own roughly every six hours, or you can ask for an
+        update now — a run takes a few minutes on the live server, since it is
+        waiting on around twenty news sites rather than anything local.
       </p>
-      {SHOW_INGEST_CONTROL ? (
-        <div className="pt-2">
-          <IngestAction tone="primary" idleLabel="Get the news" />
-        </div>
-      ) : null}
+      <div className="pt-2">
+        <IngestAction tone="primary" idleLabel="Get the news" />
+      </div>
       <p className="border-t border-border pt-4 text-xs text-subtle">
         Backend reported <code className="font-mono">503 NO_DATA</code>
         {message ? `: ${message}` : "."}
@@ -178,10 +176,8 @@ export function EmptyStoriesState() {
       </p>
       <p>
         That usually means the last ingest run pulled very little — either it
-        has only run once, or most feeds failed.{" "}
-        {SHOW_INGEST_CONTROL
-          ? ""
-          : "This refills automatically roughly every six hours — reload in a bit to check for new coverage."}
+        has only run once, or most feeds failed. This refills automatically
+        roughly every six hours, or you can trigger an update now.
       </p>
       <div className="flex flex-wrap items-start gap-3 pt-2">
         <button
@@ -193,11 +189,9 @@ export function EmptyStoriesState() {
           {isRefreshing ? "Reloading…" : "Reload"}
         </button>
       </div>
-      {SHOW_INGEST_CONTROL ? (
-        <div className="pt-1">
-          <IngestAction tone="primary" idleLabel="Update news" />
-        </div>
-      ) : null}
+      <div className="pt-1">
+        <IngestAction tone="primary" idleLabel="Update news" />
+      </div>
     </Panel>
   );
 }

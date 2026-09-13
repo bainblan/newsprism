@@ -48,13 +48,16 @@ services:
       # origin with scheme and no trailing slash.
       - key: NEWSPRISM_CORS_ORIGINS
         sync: false
-      # Shared secret for POST /api/ingest, required in an X-Ingest-Token
-      # header. Ingest is a multi-minute, CPU-bound run on half a CPU, so an
-      # open endpoint is an availability hole: anyone with the URL can start
-      # unbounded runs. Render generates the value; the cron job below reads
-      # the same variable off this service, so nothing is typed by hand.
+      # Shared secret for POST /api/ingest, sent in an X-Ingest-Token header.
+      # Since v1.3 this no longer gates access -- anonymous callers are
+      # allowed and bounded by the cooldown + single-flight lock. What the
+      # token buys is a COOLDOWN BYPASS, so the scheduled job can run on its
+      # own timetable instead of being told it is too soon. Nothing bypasses
+      # the lock. Render generates the value; the cron reads the same variable
+      # off this service, so nothing is typed by hand.
       #
-      # Leaving this UNSET leaves ingest open. Check from outside the box:
+      # Unset means nobody can bypass the cooldown, which is safe but makes
+      # the 6-hourly schedule unreliable if it ever lands inside a window.
       # GET /api/health reports "ingest_protected".
       - key: NEWSPRISM_INGEST_TOKEN
         generateValue: true
@@ -82,11 +85,11 @@ services:
       - key: NEXT_PUBLIC_API_URL
         sync: false
       #
-      # NEXT_PUBLIC_SHOW_INGEST_CONTROL is deliberately ABSENT. It reveals the
-      # ingest button, and POST /api/ingest now requires a secret that a
-      # NEXT_PUBLIC_* value cannot hold -- anything inlined into the bundle is
-      # public. Setting it here would ship a button that 401s for every
-      # visitor. It is a local-development flag only.
+      # There is no ingest-visibility flag any more (retired in contract
+      # v1.3). The "Update news" button is public, because the API bounds the
+      # work itself: one run at a time, and at most one per cooldown window.
+      # Authorization controls who asks; it never controlled how much work a
+      # caller could demand, which is what actually threatened the host.
 
   # --- Scheduled ingest ----------------------------------------------------
   # A disk cannot be attached to a cron job, so this cannot write the database

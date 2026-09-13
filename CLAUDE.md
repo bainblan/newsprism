@@ -43,11 +43,10 @@ and the group partition is byte-identical on both the 856-article window and the
 997-article full corpus, so the 0.62 threshold is untouched. Backend suite is 47
 tests. See `docs/onnx-migration.md`.
 
-Slice 1.4 — **ingest auth** — is built, verified, and closes the one thing that
-made the public link unsafe to share. `POST /api/ingest` was reachable by
-anyone: a multi-minute, CPU-bound run on half a CPU, discoverable in
-`/openapi.json`, with a browser button calling it directly. It now requires a
-shared secret. See "Ingest is closed" below.
+Slices 1.4-1.5 — **ingest auth, then the correction to bounded ingest** — are
+built and verified end to end against both halves running together. The public
+"Update news" button is back, and the server now refuses to do more work than
+it can survive. See "Ingest: bounded, not gated" below.
 
 ```
 frontend/   Next.js 16, TypeScript, Tailwind, App Router, src/ dir
@@ -140,8 +139,8 @@ ranked list of what is worth testing. Architect-owned, like the API contract.
 
 | | |
 |---|---|
-| backend | 55 tests, `pytest`, offline against a temp SQLite file |
-| frontend | 77 tests, Vitest + React Testing Library + jsdom |
+| backend | 65 tests, `pytest`, offline against a temp SQLite file |
+| frontend | 85 tests, Vitest + React Testing Library + jsdom |
 | CI | `.github/workflows/ci.yml`, two parallel jobs |
 
 From `frontend/`: `npm run test` (watch), `test:run` (CI), `typecheck`, `lint`.
@@ -168,19 +167,13 @@ staleness guards (`requestSeq` in the provider, `resolvedDetail` in the detail
 page). A suite that has never been shown to fail is not yet evidence of
 anything — this is the cheapest way to find out whether it has teeth.
 
-**Slice 1.3 is the case for why mutation testing is not optional.** The ONNX
-clusterer arrived with 6 new tests, a green suite, and an Architect verification
-that passed 10/10 against the real corpus. QA then deleted the length-bucket
-scatter-back — the line that returns each article's vector to its own index —
-and *all 46 tests still passed*. Nothing else would have caught it: the
-equivalence check only ever compares the current code to the baseline, so it
-cannot notice a test that constrains nothing. The fake tokenizer handed every
-document the same token count, which made the sort a no-op and the bucketing
-untested. In production, headlines vary in length, batches genuinely reorder,
-and a break there would swap embeddings between unrelated articles silently.
-**A test whose fixture flattens the variation it exists to exercise is not a
-test.** The fakes now use distinct per-document token counts, and the mutation
-was re-applied afterwards to watch it fail.
+**Slice 1.3 is why mutation testing is not optional here.** Deleting the ONNX
+length-bucket scatter-back — which returns each article's vector to its own
+index — left *all 46 tests passing*, because the fake tokenizer gave every
+document the same token count, making the sort a no-op and the bucketing
+untested. In production, headlines vary, batches reorder, and that break would
+swap embeddings between unrelated articles silently. **A test whose fixture
+flattens the variation it exists to exercise is not a test.**
 
 Known gaps, all deliberate: the `TIMEOUT` branch in `api.ts` (needs real
 `AbortSignal.timeout` expiry), the `USE_MOCK_DATA` branch, and end-to-end tests
@@ -189,12 +182,11 @@ tests fail on every redesign and catch nothing.
 
 ## Known issues
 
-- **HuffPost's feed is politics-only.** Its front-page feed returned 200 with
-  zero items (empty upstream), so the registry now uses
-  `huffpost.com/section/politics/feed`. That is methodologically inconsistent
-  with the general-news feeds everywhere else, so HuffPost's contribution to the
-  corpus is narrower than its peers. Salon was added alongside it so `left` is
-  not one outlet; the registry is now 8 left-ish / 5 center / 8 right-ish.
+- **HuffPost's feed is politics-only.** Its front page returned 200 with zero
+  items, so the registry uses `huffpost.com/section/politics/feed` — a
+  methodological inconsistency with the general-news feeds everywhere else, so
+  its contribution is narrower than its peers'. Salon was added so `left` is not
+  one outlet; the registry is 8 left-ish / 5 center / 8 right-ish.
 - **Newsmax times out** intermittently (rate limiting); costs ~30s per ingest.
 - **One known-bad cluster:** a Missouri cluster merges three distinct legal
   events. Threshold tuning does not fix it — it needs entity/date awareness.
@@ -236,49 +228,55 @@ story) pair and assigns greedily, best first, each side usable once:
 
 **Membership is cumulative; the 4-day window only gates clustering.** Articles
 are never deleted, so a story keeps every article it ever had. `archived` means
-none of its articles are still in the window: it leaves the list but stays fully
-renderable, which is what makes an old link work rather than 404. A merge loser
-becomes a permanent alias, chains flattened, resolved with a depth cap.
+none of its articles are still in the window: it leaves the list but stays
+renderable, so an old link works rather than 404s. A merge loser becomes a
+permanent alias, chains flattened, resolved with a depth cap.
 
-## Ingest is closed (slice 1.4)
+## Ingest: bounded, not gated (slices 1.4-1.5)
 
-`POST /api/ingest` requires a shared secret in an `X-Ingest-Token` header,
-compared with `secrets.compare_digest` in a FastAPI **dependency** so the
-rejection happens before `run_ingest()` structurally, not by statement order.
-Missing and wrong tokens return byte-identical 401s — the API never says
-whether a token is configured.
+`POST /api/ingest` is **public**. Two server-side limits protect the host:
 
-**The browser cannot be an ingest client.** `NEXT_PUBLIC_*` is inlined into the
-JS bundle, so the frontend can never hold this secret; there is no design where
-a public button and a closed endpoint coexist. The button is therefore gated
-behind `NEXT_PUBLIC_SHOW_INGEST_CONTROL`, **default off**, local dev only. The
-empty-state copy was rewritten so it reads correctly with no button in it — a
-deployed instance refills on a schedule, not by its visitors.
+- **Single-flight lock** — never two runs at once; a second caller gets `409`
+  immediately. One run peaks at 355 MB of 512 MB, so two concurrent runs is an
+  OOM. **Nothing bypasses this, including the cron.**
+- **Cooldown** — at most one run per `NEWSPRISM_INGEST_COOLDOWN_SECONDS`
+  (default 900); anyone sooner gets `429` plus `Retry-After`.
 
-**Unset token = open**, so a fresh clone still works with zero config. That is
-the wrong state for a deployment, so it is visible from outside rather than
-only in the source: `GET /api/health` reports `ingest_protected`.
+**Slice 1.4 got the axis wrong and 1.5 corrected it.** 1.4 required a token,
+reasoning that an open endpoint let anyone start unbounded runs. True, but a
+token bounds *who asks*, never *how much work they can demand* — and it did
+nothing about the actual crash, which needs no attacker at all: the cron firing
+while an operator runs one by hand is two concurrent runs and an OOM. Once the
+server bounds the work, the button is safe to show to strangers, so 1.5
+retired `NEXT_PUBLIC_SHOW_INGEST_CONTROL` entirely. **The token now buys only a
+cooldown bypass**, which the cron needs to keep its own timetable.
 
-`render.yaml` wires the secret with nothing typed by hand — the API declares it
-`generateValue: true` and the cron reads *that service's variable* via
-`fromService: { envVarKey: ... }`, the one form of `fromService` that copies a
-value instead of a hostname. `curl -f` makes a bad token a failed cron run
-rather than a site that quietly stops updating.
+`409` and `429` are **successes**, not errors — "already updating" and "already
+up to date" are good news for whoever clicked. They render in `role="status"`;
+only genuine failures are `role="alert"`.
 
-**Two mutations that escaped their own agent's first pass**, both found by
-demanding mutation proof rather than a green suite:
+**Lessons that cost something to learn:**
 
-- The backend's auth tests all set the token and then called only `/api/ingest`;
-  every other test ran with it unset. So **no test ever had the token
-  configured while calling a read endpoint**. Hoisting the dependency to
-  `include_router` — the natural edit when adding a second protected route —
-  401s every visitor on `/api/stories`, and all 54 tests stayed green. One test
-  now covers it; the mutation fails exactly that test and nothing else.
-- The frontend's component tests `vi.mock` the whole config module, so flipping
-  the flag's default to the unsafe direction (`!== "false"`) was **invisible to
-  every component test**. A test that imports the real module via `vi.stubEnv`
-  now catches it. Mocking the module that holds the decision means never
-  testing the decision.
+- **A wrong token stays a hard 401 rather than degrading to anonymous.** The
+  cron uses `curl -f`, so a corrupted token must fail loudly; degrading it to
+  "bounded anonymous caller" would turn the scheduled ingest into a no-op with
+  every dashboard light green.
+- **The lock must release on every exit path**, including the exception and the
+  total-failure 503. A leaked lock wedges ingest until restart — worse than the
+  outage it prevents. Deleting the `finally` fails 10 tests; that cascade is
+  deliberate.
+- **Never poll `POST /api/ingest` to watch a run.** It looks free, since the
+  lock rejects instantly. But a failed run records no cooldown, so a poll
+  landing just after one finds the lock free and **starts a real ingest nobody
+  asked for**. There is no read-only in-progress signal yet.
+- **Three agent mutations escaped their own first pass.** Backend auth tests
+  all set the token then called only `/api/ingest`, so hoisting the dependency
+  to `include_router` 401'd every reader while 54 tests stayed green. Frontend
+  component tests `vi.mock` the config module, making an unsafe default
+  invisible — mocking the module that holds the decision means never testing
+  the decision. And a 409 panel promised the list would "reload shortly to pick
+  up whatever that run finds" while reloading after 5s against a run taking
+  minutes: **copy is a claim the implementation has to honour.**
 
 ## The contract
 
@@ -439,16 +437,21 @@ Decisions worth remembering:
 - **Two env vars can't be auto-wired.** `fromService` exposes only private
   hostnames; the browser needs public URLs. The cron job avoids this by using
   the private network, since its client isn't a browser.
-- **The Dockerfile built correctly on Render's first attempt**, despite never
-  having been built locally — Docker is still not installed here. The budgeted
-  round of build fixes was not needed; CI proving the Linux pins resolve on
-  Python 3.13 appears to have been the thing that de-risked it.
-- **Render's GitHub App is not connected to the repo.** The build log says "it
-  looks like we don't have access to your repo, but we'll try to clone it
-  anyway" and then succeeds, because the repo is public and the clone is
-  anonymous. **The cost is that auto-deploy on push and PR previews don't
-  work** — every deploy is manual until the app is authorized for
-  `bainblan/newsprism`.
+- **The Dockerfile built on Render's first attempt** despite never having been
+  built locally; CI proving the Linux pins resolve on 3.13 de-risked it.
+- **Auto-deploy works, and so does blueprint auto-sync** (observed 2026-09-12,
+  slice 1.4). An earlier note here said neither did, because the first build
+  logged "it looks like we don't have access to your repo, but we'll try to
+  clone it anyway" and succeeded anyway on an anonymous public clone. That
+  inference was wrong: a plain `git push` to `main` re-synced `render.yaml`,
+  created the new `NEWSPRISM_INGEST_TOKEN` (so `generateValue` *did* fire on an
+  existing service), and redeployed both web services with no dashboard visit.
+  **Plan for a push to reach production on its own.**
+- **A deploy of the API looks exactly like an outage.** Its disk rules out
+  zero-downtime deploys, so `/api/health` 502s for ~40s while Render stops the
+  old instance and starts the new one. During slice 1.4 that window was briefly
+  misread as a request having crashed the service. Check for an in-progress
+  deploy before diagnosing anything else.
 
 ## Bootstrap skill
 
@@ -459,19 +462,17 @@ Python backend, and Render instead of Vercel.
 
 ## Open decisions
 
-- **Next slice — genuinely open.** The Render deploy is **done**, which closes
-  the last infrastructure gap; nothing is in progress. The candidates are the
-  four bullets below plus the `/api/health` fix (see "Deployment"), which is the
-  smallest of them and the only one with operational value the moment it lands.
+- **A read-only ingest-status signal** is now the strongest candidate. Nothing
+  can ask "is a run happening?" without POSTing, which can start one. The same
+  slice should fix `/api/health` reporting the *configured* clusterer rather
+  than the constructed one, so a silent TF-IDF fallback stops being invisible.
 - **The double encode per ingest** (see "Known issues") — worth a slice on its
   own. The fix is a `Clusterer` protocol change so one pass returns vectors and
   groups together, which touches the seam every clusterer implements.
-- **End-to-end tests** — deliberately out of scope in slice 1.2, which covered
-  units and components only. **Cheaper now than when it was deferred:**
-  `.claude/skills/run-newsprism/driver.mjs` already launches both halves, drives
-  the real UI, and asserts against the live deploy, so the work is mostly
-  promoting it into `e2e/` and giving it assertions — not adopting Playwright
-  and its CI cost from scratch.
+- **End-to-end tests** — out of scope in 1.2, and cheaper now: `driver.mjs`
+  already launches both halves and drove the whole 1.5 integration check
+  (409/429/failure panels against a real backend). The work is promoting that
+  into `e2e/` with assertions, not adopting Playwright from scratch.
 - **Synthesis LLM** — hosted API (~1¢/call, better at nuance) vs local small
   model (free, slow on CPU, weaker). Needed before the synthesis feature.
 - **Synthesis framing.** The user wants a "neutral take." Recommended instead:

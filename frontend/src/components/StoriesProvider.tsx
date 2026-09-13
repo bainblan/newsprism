@@ -24,7 +24,7 @@ import {
 } from "react";
 
 import { ApiError, fetchStories, runIngest } from "@/lib/api";
-import { API_BASE_URL } from "@/lib/config";
+import { API_BASE_URL, INGEST_IN_PROGRESS_RELOAD_DELAY_MS } from "@/lib/config";
 import type { IngestResult, StoriesResponse } from "@/lib/types";
 
 /** How many clusters the list asks for. The contract clamps 1-100. */
@@ -43,14 +43,33 @@ export type StoriesState =
   /** Any other non-2xx, carrying the contract's error envelope. */
   | { status: "failed"; message: string; code?: string; httpStatus?: number };
 
-export type IngestPhase = "idle" | "running" | "refreshing" | "done" | "failed";
+/**
+ * `in_progress` (409) and `cooldown` (429) are contract-defined *good* outcomes
+ * — someone else is already updating, or the data is already fresh — and must
+ * render as such, not as `failed`. `timed_out` means the client gave up
+ * waiting; the run itself continues server-side, so it is not `failed` either.
+ */
+export type IngestPhase =
+  | "idle"
+  | "running"
+  | "refreshing"
+  | "done"
+  | "failed"
+  | "in_progress"
+  | "cooldown"
+  | "timed_out";
 
 export interface IngestState {
   phase: IngestPhase;
   /** Wall-clock ms since the POST was issued. Real elapsed time, not a guess. */
   elapsedMs: number;
   result: IngestResult | null;
+  /** Set only for `failed`. */
   error: string | null;
+  /** Set for `in_progress` / `cooldown` (the server's own message, rendered
+   * verbatim per the contract) and `timed_out` (our own copy — there is no
+   * server message when nothing responded). */
+  message: string | null;
 }
 
 const IDLE_INGEST: IngestState = {
@@ -58,6 +77,7 @@ const IDLE_INGEST: IngestState = {
   elapsedMs: 0,
   result: null,
   error: null,
+  message: null,
 };
 
 interface StoriesContextValue {
@@ -125,6 +145,26 @@ export function StoriesProvider({ children }: { children: ReactNode }) {
   /** When the current ingest POST was issued, so elapsed time survives the
    *  running -> refreshing transition. */
   const ingestStartedAt = useRef(0);
+  /**
+   * The single delayed reload scheduled after a 409, so it can be cancelled
+   * on dismiss or unmount instead of firing into a stale/unmounted tree.
+   *
+   * This is a courtesy, not a signal: the run that returned 409 takes minutes
+   * (see INGEST_TIMEOUT_MS), so this GET will almost never reflect its
+   * result. It exists only because a single extra GET is free and harmless,
+   * not because it usefully "checks" on the other run — do not describe it
+   * to the user as doing so.
+   */
+  const pendingReloadTimer = useRef<number | null>(null);
+
+  const cancelPendingReload = useCallback(() => {
+    if (pendingReloadTimer.current !== null) {
+      window.clearTimeout(pendingReloadTimer.current);
+      pendingReloadTimer.current = null;
+    }
+  }, []);
+
+  useEffect(() => cancelPendingReload, [cancelPendingReload]);
 
   // Initial load. The state already starts as "loading", so nothing is set
   // before the request resolves.
@@ -159,8 +199,15 @@ export function StoriesProvider({ children }: { children: ReactNode }) {
   }, [reload]);
 
   const startIngest = useCallback(() => {
+    cancelPendingReload();
     ingestStartedAt.current = Date.now();
-    setIngest({ phase: "running", elapsedMs: 0, result: null, error: null });
+    setIngest({
+      phase: "running",
+      elapsedMs: 0,
+      result: null,
+      error: null,
+      message: null,
+    });
 
     void (async () => {
       try {
@@ -170,6 +217,7 @@ export function StoriesProvider({ children }: { children: ReactNode }) {
           phase: "refreshing",
           result,
           error: null,
+          message: null,
         }));
 
         // Ingest is only useful if the list then reflects it, so the refetch is
@@ -178,6 +226,63 @@ export function StoriesProvider({ children }: { children: ReactNode }) {
 
         setIngest((previous) => ({ ...previous, phase: "done" }));
       } catch (error) {
+        if (error instanceof ApiError && error.isInProgress) {
+          // Good news, not a failure: someone else's run is already going.
+          // It takes minutes (INGEST_TIMEOUT_MS), so nothing here can make
+          // the list current sooner — the honest thing is to say so and let
+          // the person check back, which is what IngestInProgress's copy
+          // does. The delayed reload below is just a free, harmless GET, not
+          // a mechanism for "catching" the other run's result.
+          setIngest((previous) => ({
+            ...previous,
+            phase: "in_progress",
+            error: null,
+            message: error.message,
+          }));
+          pendingReloadTimer.current = window.setTimeout(() => {
+            pendingReloadTimer.current = null;
+            void reload();
+          }, INGEST_IN_PROGRESS_RELOAD_DELAY_MS);
+          return;
+        }
+
+        // Deliberately NOT implemented: retrying via POST /api/ingest instead
+        // of (or in addition to) this GET-only reload. It looks free — while
+        // the lock is held, a POST is rejected instantly and costs nothing —
+        // but if the in-progress run then FAILS, no cooldown is recorded
+        // (mark_ingest_time() only runs on success). A poll landing right
+        // after that failure would find the lock free and no cooldown, and
+        // would kick off a brand-new, genuinely expensive ingest that nobody
+        // asked for. A retry that can silently trigger the job it's
+        // retrying is worse than not retrying at all.
+
+        if (error instanceof ApiError && error.isCooldown) {
+          // Also good news: a run finished too recently to bother repeating.
+          // The server's message says how recently, so render it verbatim.
+          setIngest((previous) => ({
+            ...previous,
+            phase: "cooldown",
+            error: null,
+            message: error.message,
+          }));
+          return;
+        }
+
+        if (error instanceof ApiError && error.isTimeout) {
+          // No response arrived, but the run continues server-side — this is
+          // not evidence of failure, just of a client-side deadline.
+          setIngest((previous) => ({
+            ...previous,
+            phase: "timed_out",
+            error: null,
+            message:
+              "No response yet, but the run keeps going on the server — " +
+              "an ingest can take several minutes on the live host. Reload " +
+              "in a bit to check for new stories.",
+          }));
+          return;
+        }
+
         const message =
           error instanceof ApiError
             ? error.message
@@ -186,12 +291,16 @@ export function StoriesProvider({ children }: { children: ReactNode }) {
           ...previous,
           phase: "failed",
           error: message,
+          message: null,
         }));
       }
     })();
-  }, [reload]);
+  }, [cancelPendingReload, reload]);
 
-  const dismissIngest = useCallback(() => setIngest(IDLE_INGEST), []);
+  const dismissIngest = useCallback(() => {
+    cancelPendingReload();
+    setIngest(IDLE_INGEST);
+  }, [cancelPendingReload]);
 
   // Elapsed-time ticker. Only runs while a request is actually in flight.
   const ingestPhase = ingest.phase;

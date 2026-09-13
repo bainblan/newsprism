@@ -7,6 +7,7 @@ and POST /api/ingest blocks on it.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Any
 
@@ -14,7 +15,7 @@ import numpy as np
 
 from .clustering import Document, TfidfClusterer, get_clusterer
 from .config import settings
-from .db import init_db
+from .db import get_meta, init_db
 from .outlets import active_outlets
 from .rss import dedupe, fetch_all
 from .store import articles_for_clustering, track_and_persist_stories, upsert_articles
@@ -23,6 +24,33 @@ from .timeutil import now_iso_z
 log = logging.getLogger("newsprism.pipeline")
 
 LAST_INGEST_KEY = "last_ingest_at"
+
+# Single-flight guard for run_ingest(). The route is a sync `def`, so
+# Starlette runs each request in a threadpool and concurrent POSTs genuinely
+# run on separate threads of the same process - a plain module-level flag
+# would race. threading.Lock is correct here specifically because this is a
+# single process; it would not coordinate across multiple instances (see the
+# contract's note on that). Never switch the route to `async def` - that
+# would change the execution model this lock depends on.
+_INGEST_LOCK = threading.Lock()
+
+
+def try_acquire_ingest_lock() -> bool:
+    """Non-blocking acquire. Returns False immediately if already held."""
+    return _INGEST_LOCK.acquire(blocking=False)
+
+
+def release_ingest_lock() -> None:
+    _INGEST_LOCK.release()
+
+
+def last_ingest_at() -> str | None:
+    """The timestamp of the last *successful* ingest, or None if none yet.
+
+    Reuses the same meta key `mark_ingest_time()` writes - not a second
+    source of truth for "when did ingest last run".
+    """
+    return get_meta(LAST_INGEST_KEY)
 
 
 def _pick_representative(

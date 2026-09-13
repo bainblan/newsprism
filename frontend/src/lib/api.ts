@@ -35,6 +35,8 @@ export class ApiError extends Error {
   readonly code?: string;
   /** The URL that was attempted — shown in the error state so it is debuggable. */
   readonly url: string;
+  /** Seconds from a `Retry-After` header, when the response sent one (429). */
+  readonly retryAfterSeconds?: number;
 
   constructor(init: {
     kind: ApiErrorKind;
@@ -42,6 +44,7 @@ export class ApiError extends Error {
     url: string;
     status?: number;
     code?: string;
+    retryAfterSeconds?: number;
   }) {
     super(init.message);
     this.name = "ApiError";
@@ -49,6 +52,7 @@ export class ApiError extends Error {
     this.status = init.status;
     this.code = init.code;
     this.url = init.url;
+    this.retryAfterSeconds = init.retryAfterSeconds;
   }
 
   /** True for the 503 NO_DATA case, which is an empty state and not a failure. */
@@ -59,6 +63,22 @@ export class ApiError extends Error {
   /** True for the 404 NOT_FOUND case: an id that was never issued or was removed. */
   get isNotFound(): boolean {
     return this.kind === "api" && this.code === "NOT_FOUND";
+  }
+
+  /** 409 — someone else's ingest run is already going. Good news, not a failure. */
+  get isInProgress(): boolean {
+    return this.kind === "api" && this.code === "INGEST_IN_PROGRESS";
+  }
+
+  /** 429 — a run finished too recently. Good news: the data is already fresh. */
+  get isCooldown(): boolean {
+    return this.kind === "api" && this.code === "INGEST_COOLDOWN";
+  }
+
+  /** The request timed out client-side. The backend may still be working —
+   * this is not evidence the run failed. */
+  get isTimeout(): boolean {
+    return this.kind === "network" && this.code === "TIMEOUT";
   }
 }
 
@@ -142,6 +162,8 @@ async function request<T>(
 
   if (!response.ok) {
     const envelope = parseErrorEnvelope(body);
+    const retryAfterHeader = response.headers.get("Retry-After");
+    const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : NaN;
     throw new ApiError({
       kind: "api",
       status: response.status,
@@ -150,6 +172,9 @@ async function request<T>(
       message:
         envelope?.message ??
         `The backend returned ${response.status} without a readable error envelope.`,
+      retryAfterSeconds: Number.isFinite(retryAfterSeconds)
+        ? retryAfterSeconds
+        : undefined,
     });
   }
 

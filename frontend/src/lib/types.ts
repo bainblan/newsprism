@@ -101,7 +101,14 @@ export interface OutletsResponse {
 }
 
 /** Documented error codes. The backend may in principle send others. */
-export type ApiErrorCode = "INVALID_PARAM" | "NO_DATA" | "NOT_FOUND" | "INTERNAL";
+export type ApiErrorCode =
+  | "INVALID_PARAM"
+  | "NO_DATA"
+  | "NOT_FOUND"
+  | "INTERNAL"
+  | "UNAUTHORIZED"
+  | "INGEST_IN_PROGRESS"
+  | "INGEST_COOLDOWN";
 
 /** The error envelope used by every non-2xx response, with no exceptions. */
 export interface ApiErrorEnvelope {

@@ -28,6 +28,16 @@ function textResponse(text: string, init: { status?: number } = {}) {
   });
 }
 
+function jsonResponseWithHeaders(
+  body: unknown,
+  init: { status?: number; headers?: Record<string, string> } = {},
+) {
+  return new Response(JSON.stringify(body), {
+    status: init.status ?? 200,
+    headers: { "content-type": "application/json", ...init.headers },
+  });
+}
+
 describe("lib/api", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -210,6 +220,88 @@ describe("lib/api", () => {
 
       const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
       expect(init.method).toBe("POST");
+    });
+
+    it("maps 409 INGEST_IN_PROGRESS to isInProgress true, everything else false", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          jsonResponse(
+            {
+              error: {
+                code: "INGEST_IN_PROGRESS",
+                message: "A refresh is already running.",
+              },
+            },
+            { status: 409 },
+          ),
+        ),
+      );
+
+      await expect(runIngest()).rejects.toSatisfy((error: unknown) => {
+        const apiError = error as ApiError;
+        expect(apiError.isInProgress).toBe(true);
+        expect(apiError.isCooldown).toBe(false);
+        expect(apiError.isTimeout).toBe(false);
+        expect(apiError.message).toBe("A refresh is already running.");
+        return true;
+      });
+    });
+
+    it("maps 429 INGEST_COOLDOWN to isCooldown true and carries retryAfterSeconds", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          jsonResponseWithHeaders(
+            {
+              error: {
+                code: "INGEST_COOLDOWN",
+                message: "Already updated 3 minutes ago.",
+              },
+            },
+            { status: 429, headers: { "Retry-After": "720" } },
+          ),
+        ),
+      );
+
+      await expect(runIngest()).rejects.toSatisfy((error: unknown) => {
+        const apiError = error as ApiError;
+        expect(apiError.isCooldown).toBe(true);
+        expect(apiError.isInProgress).toBe(false);
+        expect(apiError.retryAfterSeconds).toBe(720);
+        return true;
+      });
+    });
+
+    // Exercising the real AbortSignal.timeout expiry through `request()` is the
+    // documented known gap (see CLAUDE.md) — faking it would mean faking
+    // AbortSignal itself, which is more likely to hide a real bug than find
+    // one. `isTimeout` is a pure getter, so it's tested directly instead.
+    it("isTimeout is true only for a network-kind error coded TIMEOUT", () => {
+      const timeoutError = new ApiError({
+        kind: "network",
+        code: "TIMEOUT",
+        message: "The backend did not respond within 300s.",
+        url: "http://localhost:8000/api/ingest",
+      });
+      expect(timeoutError.isTimeout).toBe(true);
+
+      const unreachableError = new ApiError({
+        kind: "network",
+        code: "UNREACHABLE",
+        message: "Could not reach the backend.",
+        url: "http://localhost:8000/api/ingest",
+      });
+      expect(unreachableError.isTimeout).toBe(false);
+
+      const apiKindError = new ApiError({
+        kind: "api",
+        status: 500,
+        code: "TIMEOUT",
+        message: "shouldn't happen, but kind must also match",
+        url: "http://localhost:8000/api/ingest",
+      });
+      expect(apiKindError.isTimeout).toBe(false);
     });
   });
 

@@ -20,8 +20,18 @@ from fastapi import HTTPException
 class ApiError(HTTPException):
     """Raise this instead of HTTPException so the envelope is never bypassed."""
 
-    def __init__(self, status_code: int, code: str, message: str) -> None:
-        super().__init__(status_code=status_code, detail={"code": code, "message": message})
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(
+            status_code=status_code,
+            detail={"code": code, "message": message},
+            headers=headers,
+        )
         self.code = code
         self.message = message
 
@@ -44,6 +54,16 @@ def not_found(message: str) -> ApiError:
 
 def unauthorized(message: str) -> ApiError:
     return ApiError(401, "UNAUTHORIZED", message)
+
+
+def ingest_in_progress(message: str) -> ApiError:
+    return ApiError(409, "INGEST_IN_PROGRESS", message)
+
+
+def ingest_cooldown(message: str, retry_after: int) -> ApiError:
+    return ApiError(
+        429, "INGEST_COOLDOWN", message, headers={"Retry-After": str(retry_after)}
+    )
 
 
 def internal(message: str = "An unexpected internal error occurred.") -> ApiError:

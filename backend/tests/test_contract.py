@@ -13,6 +13,8 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+import threading
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -26,10 +28,12 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app import routes, store  # noqa: E402
 from app import main as app_main  # noqa: E402
 from app.config import settings  # noqa: E402
-from app.db import connect, init_db  # noqa: E402
+from app.db import connect, init_db, set_meta  # noqa: E402
 from app.main import app  # noqa: E402
 from app.outlets import LEANS, OUTLETS, empty_coverage  # noqa: E402
+from app.pipeline import LAST_INGEST_KEY  # noqa: E402
 from app.rss import Article, FeedResult, normalize_url, parse_feed  # noqa: E402
+from app.timeutil import now_iso_z, to_iso_z, utcnow  # noqa: E402
 
 ISO_Z = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
@@ -716,27 +720,43 @@ def test_ingest_configured_token_correct_header_proceeds(client, monkeypatch, in
     assert calls == [1]
 
 
-def test_ingest_configured_token_missing_header_is_401(client, monkeypatch, ingest_token):
+def test_ingest_configured_token_missing_header_is_allowed_and_bounded(
+    client, monkeypatch, ingest_token
+):
+    """Reversed in v1.3: no header is anonymous-and-allowed, not 401.
+
+    v1.2 made a missing header a hard 401 once a token was configured. v1.3
+    makes the server bound anonymous callers itself (cooldown + lock), so the
+    browser needs to be able to call this with no header at all.
+    """
     ingest_token("s3cr3t-value")
-    monkeypatch.setattr(routes, "run_ingest", lambda: pytest.fail("run_ingest must not run"))
+    calls = []
+    monkeypatch.setattr(routes, "run_ingest", lambda: calls.append(1) or _FAKE_INGEST_RESULT)
 
     response = client.post("/api/ingest")
 
-    assert response.status_code == 401
-    body = response.json()
-    assert body["error"]["code"] == "UNAUTHORIZED"
+    assert response.status_code == 200
+    assert calls == [1]
 
 
-def test_ingest_missing_and_wrong_token_responses_are_identical(client, monkeypatch, ingest_token):
-    """A missing token and a wrong one must be indistinguishable to the caller."""
+def test_ingest_missing_and_wrong_token_are_no_longer_identical(
+    client, monkeypatch, ingest_token
+):
+    """v1.3 deliberately distinguishes these: missing is allowed, wrong is 401.
+
+    This replaces the v1.2 test of the same shape, which asserted the
+    opposite - the two cases must now differ, and differ specifically in the
+    way the contract lays out.
+    """
     ingest_token("s3cr3t-value")
-    monkeypatch.setattr(routes, "run_ingest", lambda: pytest.fail("run_ingest must not run"))
+    monkeypatch.setattr(routes, "run_ingest", lambda: _FAKE_INGEST_RESULT)
 
     missing = client.post("/api/ingest")
     wrong = client.post("/api/ingest", headers={"X-Ingest-Token": "wrong-value"})
 
-    assert missing.status_code == wrong.status_code == 401
-    assert missing.json() == wrong.json()
+    assert missing.status_code == 200
+    assert wrong.status_code == 401
+    assert wrong.json()["error"]["code"] == "UNAUTHORIZED"
 
 
 def test_ingest_non_ascii_header_is_401_not_500(client, monkeypatch, ingest_token):
@@ -808,6 +828,207 @@ def test_health_reports_ingest_protected_state(ingest_token):
 
     ingest_token("s3cr3t-value")
     assert app_main.health()["ingest_protected"] == "true"
+
+
+# --------------------------------------------------------------------------
+# POST /api/ingest — single-flight lock + cooldown (contract v1.3)
+# --------------------------------------------------------------------------
+
+
+def test_ingest_concurrent_requests_exactly_one_wins(client, monkeypatch):
+    """The single-flight lock is real, not mocked: two genuine threads race.
+
+    The second request is only sent once the first is confirmed to be inside
+    ``run_ingest`` (holding the lock), which makes the 409 deterministic
+    rather than a race that could pass by luck. That still exercises the
+    real ``threading.Lock`` in ``app.pipeline`` - nothing about the lock
+    itself is faked.
+    """
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def fake_run_ingest():
+        calls.append(1)
+        started.set()
+        assert release.wait(timeout=5), "test deadlocked waiting on release"
+        return _FAKE_INGEST_RESULT
+
+    monkeypatch.setattr(routes, "run_ingest", fake_run_ingest)
+
+    first_response = {}
+
+    def call_first():
+        first_response["r"] = client.post("/api/ingest")
+
+    t1 = threading.Thread(target=call_first)
+    t1.start()
+    assert started.wait(timeout=5), "first request never entered run_ingest"
+
+    second = client.post("/api/ingest")
+    release.set()
+    t1.join(timeout=5)
+
+    assert first_response["r"].status_code == 200
+    assert second.status_code == 409
+    assert second.json()["error"]["code"] == "INGEST_IN_PROGRESS"
+    assert calls == [1]
+
+
+def test_ingest_lock_released_after_run_ingest_raises(client, monkeypatch):
+    monkeypatch.setattr(routes, "run_ingest", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    first = client.post("/api/ingest")
+    assert first.status_code == 500
+
+    monkeypatch.setattr(routes, "run_ingest", lambda: _FAKE_INGEST_RESULT)
+    second = client.post("/api/ingest")
+    assert second.status_code == 200
+
+
+def test_ingest_lock_released_after_total_feed_failure(client, monkeypatch):
+    failed_result = {
+        **_FAKE_INGEST_RESULT,
+        "feeds_attempted": 3,
+        "feeds_succeeded": 0,
+        "feeds_failed": ["https://a", "https://b", "https://c"],
+    }
+    monkeypatch.setattr(routes, "run_ingest", lambda: failed_result)
+
+    first = client.post("/api/ingest")
+    assert first.status_code == 503
+    assert first.json()["error"]["code"] == "NO_DATA"
+
+    monkeypatch.setattr(routes, "run_ingest", lambda: _FAKE_INGEST_RESULT)
+    second = client.post("/api/ingest")
+    assert second.status_code == 200
+
+
+def test_ingest_failed_run_does_not_start_a_cooldown(client, monkeypatch):
+    """mark_ingest_time only runs on success, so a failed run must not gate the next call."""
+    failed_result = {
+        **_FAKE_INGEST_RESULT,
+        "feeds_attempted": 2,
+        "feeds_succeeded": 0,
+        "feeds_failed": ["https://a", "https://b"],
+    }
+    monkeypatch.setattr(routes, "run_ingest", lambda: failed_result)
+    assert client.post("/api/ingest").status_code == 503
+
+    monkeypatch.setattr(routes, "run_ingest", lambda: _FAKE_INGEST_RESULT)
+    second = client.post("/api/ingest")
+    # Not 429: a failed run recorded no last-ingest time, so there is nothing
+    # for a cooldown to measure from.
+    assert second.status_code == 200
+
+
+def test_ingest_cooldown_rejects_within_the_window(client, monkeypatch):
+    set_meta(LAST_INGEST_KEY, now_iso_z())
+    monkeypatch.setattr(routes, "run_ingest", lambda: pytest.fail("run_ingest must not run"))
+
+    response = client.post("/api/ingest")
+
+    assert response.status_code == 429
+    body = response.json()
+    assert body["error"]["code"] == "INGEST_COOLDOWN"
+    retry_after = int(response.headers["retry-after"])
+    assert 0 < retry_after <= settings.ingest_cooldown_seconds
+
+
+def test_ingest_cooldown_message_is_plain_language_not_bare_seconds(client, monkeypatch):
+    """The message is rendered verbatim by the frontend - nobody says "884 seconds".
+
+    The numeric ``Retry-After`` *header* stays an exact second count for
+    machines; only the human-facing ``message`` string gets the plain-
+    language treatment. With the default 900s cooldown and a last-ingest
+    time of "now", the wait is close enough to the full window that a raw
+    seconds count would render as an ugly three-digit number on nearly every
+    real 429 - this is the realistic case the fix exists for.
+    """
+    set_meta(LAST_INGEST_KEY, now_iso_z())
+    monkeypatch.setattr(routes, "run_ingest", lambda: pytest.fail("run_ingest must not run"))
+
+    response = client.post("/api/ingest")
+
+    assert response.status_code == 429
+    message = response.json()["error"]["message"]
+    assert not re.search(r"\d+\s*seconds", message), message
+    assert "minute" in message
+
+    # The header is unaffected by the wording fix - still an exact number.
+    retry_after = int(response.headers["retry-after"])
+    assert 0 < retry_after <= settings.ingest_cooldown_seconds
+
+
+def test_ingest_cooldown_allows_once_the_window_has_passed(client, monkeypatch):
+    stale = utcnow() - timedelta(seconds=settings.ingest_cooldown_seconds + 5)
+    set_meta(LAST_INGEST_KEY, to_iso_z(stale))
+    calls = []
+    monkeypatch.setattr(routes, "run_ingest", lambda: calls.append(1) or _FAKE_INGEST_RESULT)
+
+    response = client.post("/api/ingest")
+
+    assert response.status_code == 200
+    assert calls == [1]
+
+
+def test_ingest_valid_token_bypasses_cooldown(client, monkeypatch, ingest_token):
+    ingest_token("s3cr3t-value")
+    set_meta(LAST_INGEST_KEY, now_iso_z())
+    calls = []
+    monkeypatch.setattr(routes, "run_ingest", lambda: calls.append(1) or _FAKE_INGEST_RESULT)
+
+    response = client.post("/api/ingest", headers={"X-Ingest-Token": "s3cr3t-value"})
+
+    assert response.status_code == 200
+    assert calls == [1]
+
+
+def test_ingest_valid_token_does_not_bypass_the_lock(client, monkeypatch, ingest_token):
+    """The lock is absolute per the contract - a token buys past the cooldown, never the lock."""
+    ingest_token("s3cr3t-value")
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def fake_run_ingest():
+        calls.append(1)
+        started.set()
+        assert release.wait(timeout=5), "test deadlocked waiting on release"
+        return _FAKE_INGEST_RESULT
+
+    monkeypatch.setattr(routes, "run_ingest", fake_run_ingest)
+
+    first_response = {}
+
+    def call_first():
+        first_response["r"] = client.post(
+            "/api/ingest", headers={"X-Ingest-Token": "s3cr3t-value"}
+        )
+
+    t1 = threading.Thread(target=call_first)
+    t1.start()
+    assert started.wait(timeout=5), "first request never entered run_ingest"
+
+    second = client.post("/api/ingest", headers={"X-Ingest-Token": "s3cr3t-value"})
+    release.set()
+    t1.join(timeout=5)
+
+    assert first_response["r"].status_code == 200
+    assert second.status_code == 409
+    assert calls == [1]
+
+
+def test_ingest_invalid_token_is_401_even_during_cooldown(client, monkeypatch, ingest_token):
+    """Proves ordering: the token check runs before, and regardless of, the cooldown."""
+    ingest_token("s3cr3t-value")
+    set_meta(LAST_INGEST_KEY, now_iso_z())
+    monkeypatch.setattr(routes, "run_ingest", lambda: pytest.fail("run_ingest must not run"))
+
+    response = client.post("/api/ingest", headers={"X-Ingest-Token": "wrong-value"})
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "UNAUTHORIZED"
 
 
 def test_dedupe_collapses_the_same_url_across_feeds():

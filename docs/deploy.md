@@ -54,34 +54,40 @@ compared against a browser `Origin` header. A private hostname is wrong for
 both. The cron job *does* use the private network, because its client is the
 cron container rather than a browser — which is why it needs no manual URL.
 
-## Ingest is authenticated
+## Ingest is bounded, not gated (contract v1.3)
 
-`POST /api/ingest` requires a shared secret in an `X-Ingest-Token` header. It
-starts a multi-minute, CPU-bound run on half a CPU, so an open endpoint is an
-availability hole rather than a billing one: anyone with the URL can start
-unbounded runs and make the site unresponsive for everyone else.
+`POST /api/ingest` is **public**. Anyone may call it, including the "Update
+news" button in the browser. What protects the host is not authorization but
+two server-side limits:
 
-The blueprint wires this with no typing. `newsprism-api` declares the variable
-with `generateValue: true`, and `newsprism-ingest` reads *the same variable off
-that service* via `fromService: { envVarKey: NEWSPRISM_INGEST_TOKEN }` — the
-one form of `fromService` that copies a value instead of a hostname. The secret
-therefore exists in exactly one place and is never pasted anywhere.
+- **A single-flight lock.** Never two runs at once. A second caller gets
+  `409 INGEST_IN_PROGRESS` immediately. One run peaks at 355 MB of a 512 MB
+  instance, so two concurrent runs is an out-of-memory kill — this is the limit
+  that keeps the service alive, and **nothing bypasses it, including the cron**.
+- **A cooldown.** At most one run per `NEWSPRISM_INGEST_COOLDOWN_SECONDS`
+  (default 900). Anyone asking sooner gets `429 INGEST_COOLDOWN` with a
+  `Retry-After` header. This bounds total work no matter how many people click.
 
-**On a deployment that predates this change, the variable does not appear by
-itself.** `generateValue` fires when a service is created. Sync the blueprint
-from the dashboard so Render picks up both new entries; if no value is
-generated on the API, set one there by hand (any long random string) and sync
-again so the cron inherits it. Then confirm with the health check below and by
-running the cron job manually once.
+v1.2 tried to solve this with a shared secret alone. That was the wrong axis:
+a token bounds *who asks*, never *how much work they can demand*. It also did
+nothing about the real crash — the cron firing while an operator ran one by
+hand, two concurrent runs, no bad actor anywhere.
 
-**When the variable is unset the endpoint stays open**, so that a fresh clone
-works with no configuration. That is the wrong state for a deployment, and it
-is visible from outside: `GET /api/health` reports `"ingest_protected"`.
+**What `NEWSPRISM_INGEST_TOKEN` is for now: bypassing the cooldown.** The
+scheduled job must run on its own timetable rather than being told it is too
+soon. The blueprint wires it automatically — `generateValue: true` on
+`newsprism-api`, and `newsprism-ingest` reads that same variable via
+`fromService: { envVarKey: NEWSPRISM_INGEST_TOKEN }`, the one form of
+`fromService` that copies a value instead of a hostname.
 
-The browser is not an ingest client. `NEXT_PUBLIC_*` values are compiled into
-the JavaScript bundle, so the frontend cannot hold this secret — the ingest
-button is hidden unless `NEXT_PUBLIC_SHOW_INGEST_CONTROL=true`, which is for
-local development only and must never be set on `newsprism-web`.
+**If the cron loses its token it does not fail loudly every time — it fails
+occasionally**, whenever its run happens to land inside a 15-minute window
+after somebody pressed the button. `curl -f` turns that 429 into a failed job.
+An *intermittently* failing cron is the signature of a missing token bypass,
+not of a broken feed.
+
+A present-but-wrong token is still a hard `401`, so a corrupted value fails
+every time rather than degrading to an anonymous caller.
 
 ## First data
 
@@ -93,6 +99,9 @@ dashboard:
 ```
 curl -X POST https://newsprism-api-7651.onrender.com/api/ingest   -H "X-Ingest-Token: $NEWSPRISM_INGEST_TOKEN" --max-time 3600
 ```
+
+The header is optional — without it you are simply subject to the cooldown, and
+a `429` means the data is already fresh rather than that anything is wrong.
 
 Note the hostname: the API is **`newsprism-api-7651`**. `newsprism-api` was
 taken globally and belongs to an unrelated project that also answers on

@@ -81,7 +81,13 @@ app.include_router(router)
 
 @app.exception_handler(StarletteHTTPException)
 def http_exception_handler(_: Request, exc: StarletteHTTPException) -> JSONResponse:
-    """ApiError carries {code, message}; anything else gets a generic mapping."""
+    """ApiError carries {code, message}; anything else gets a generic mapping.
+
+    ``exc.headers`` (e.g. ``Retry-After`` on a 429 ``INGEST_COOLDOWN``) must be
+    forwarded explicitly — ``JSONResponse`` does not inherit them from the
+    exception on its own, so a header set via ``ApiError(..., headers=...)``
+    would otherwise be silently dropped on the way to the wire.
+    """
     detail = exc.detail
     if isinstance(detail, dict) and "code" in detail and "message" in detail:
         body = envelope(str(detail["code"]), str(detail["message"]))
@@ -90,7 +96,7 @@ def http_exception_handler(_: Request, exc: StarletteHTTPException) -> JSONRespo
             exc.status_code, "INTERNAL"
         )
         body = envelope(code, str(detail) if detail else "Request could not be handled.")
-    return JSONResponse(status_code=exc.status_code, content=body)
+    return JSONResponse(status_code=exc.status_code, content=body, headers=exc.headers)
 
 
 @app.exception_handler(RequestValidationError)

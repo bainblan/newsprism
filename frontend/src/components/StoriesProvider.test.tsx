@@ -49,6 +49,7 @@ function Consumer() {
       <span data-testid="ingest-phase">{ingest.phase}</span>
       <span data-testid="elapsed">{ingest.elapsedMs}</span>
       <span data-testid="ingest-error">{ingest.error ?? ""}</span>
+      <span data-testid="ingest-message">{ingest.message ?? ""}</span>
       <button onClick={startIngest}>start</button>
       <button onClick={refresh}>refresh</button>
     </div>
@@ -224,16 +225,17 @@ describe("StoriesProvider", () => {
     expect(screen.getByTestId("ingest-phase")).toHaveTextContent("done");
   });
 
-  it("reaches ingest phase failed when the ingest POST rejects", async () => {
+  it("reaches ingest phase failed when the ingest POST rejects with a genuine error", async () => {
     mockedFetchStories.mockResolvedValueOnce(sampleList);
     renderProvider();
     await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("ready"));
 
     mockedRunIngest.mockRejectedValueOnce(
       new ApiError({
-        kind: "network",
-        code: "TIMEOUT",
-        message: "The backend did not respond within 180s.",
+        kind: "api",
+        status: 500,
+        code: "INTERNAL",
+        message: "Something went wrong on the server.",
         url: "http://localhost:8000/api/ingest",
       }),
     );
@@ -244,7 +246,151 @@ describe("StoriesProvider", () => {
 
     await waitFor(() => expect(screen.getByTestId("ingest-phase")).toHaveTextContent("failed"));
     expect(screen.getByTestId("ingest-error")).toHaveTextContent(
-      "The backend did not respond within 180s.",
+      "Something went wrong on the server.",
+    );
+  });
+
+  it("a client-side timeout does NOT render as failed — the run continues server-side", async () => {
+    mockedFetchStories.mockResolvedValueOnce(sampleList);
+    renderProvider();
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("ready"));
+
+    const ingestGate = deferred<IngestResult>();
+    mockedRunIngest.mockReturnValueOnce(ingestGate.promise);
+
+    await act(async () => {
+      screen.getByRole("button", { name: "start" }).click();
+    });
+    expect(screen.getByTestId("ingest-phase")).toHaveTextContent("running");
+
+    const timeoutError = new ApiError({
+      kind: "network",
+      code: "TIMEOUT",
+      message: "The backend did not respond within 300s.",
+      url: "http://localhost:8000/api/ingest",
+    });
+    await act(async () => {
+      ingestGate.reject(timeoutError);
+      await ingestGate.promise.catch(() => {});
+    });
+
+    expect(screen.getByTestId("ingest-phase")).toHaveTextContent("timed_out");
+    expect(screen.getByTestId("ingest-phase")).not.toHaveTextContent("failed");
+    expect(screen.getByTestId("ingest-error")).toHaveTextContent("");
+    expect(screen.getByTestId("ingest-message")).toHaveTextContent(/reload/i);
+  });
+
+  it("409 INGEST_IN_PROGRESS is a good-news phase, not a failure, and renders the server's message verbatim", async () => {
+    mockedFetchStories.mockResolvedValueOnce(sampleList);
+    renderProvider();
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("ready"));
+
+    const ingestGate = deferred<IngestResult>();
+    mockedRunIngest.mockReturnValueOnce(ingestGate.promise);
+
+    await act(async () => {
+      screen.getByRole("button", { name: "start" }).click();
+    });
+    expect(screen.getByTestId("ingest-phase")).toHaveTextContent("running");
+
+    const inProgressError = new ApiError({
+      kind: "api",
+      status: 409,
+      code: "INGEST_IN_PROGRESS",
+      message: "A refresh is already running. Hang tight.",
+      url: "http://localhost:8000/api/ingest",
+    });
+    await act(async () => {
+      ingestGate.reject(inProgressError);
+      await ingestGate.promise.catch(() => {});
+    });
+
+    expect(screen.getByTestId("ingest-phase")).toHaveTextContent("in_progress");
+    expect(screen.getByTestId("ingest-phase")).not.toHaveTextContent("failed");
+    expect(screen.getByTestId("ingest-phase")).not.toHaveTextContent("done");
+    expect(screen.getByTestId("ingest-error")).toHaveTextContent("");
+    expect(screen.getByTestId("ingest-message")).toHaveTextContent(
+      "A refresh is already running. Hang tight.",
+    );
+  });
+
+  it("409 schedules exactly one reload of the story list after a short delay", async () => {
+    mockedFetchStories.mockResolvedValueOnce(sampleList);
+    renderProvider();
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("ready"));
+
+    // Fake timers only from here (same reasoning as the ticking test above):
+    // the setTimeout for the delayed reload is scheduled inside the catch
+    // branch below, so it must already be a fake timer when that runs.
+    vi.useFakeTimers();
+
+    const ingestGate = deferred<IngestResult>();
+    mockedRunIngest.mockReturnValueOnce(ingestGate.promise);
+
+    await act(async () => {
+      screen.getByRole("button", { name: "start" }).click();
+    });
+
+    const inProgressError = new ApiError({
+      kind: "api",
+      status: 409,
+      code: "INGEST_IN_PROGRESS",
+      message: "A refresh is already running. Hang tight.",
+      url: "http://localhost:8000/api/ingest",
+    });
+    await act(async () => {
+      ingestGate.reject(inProgressError);
+      await ingestGate.promise.catch(() => {});
+    });
+    expect(screen.getByTestId("ingest-phase")).toHaveTextContent("in_progress");
+
+    const reloadGate = deferred<StoriesResponse>();
+    mockedFetchStories.mockReturnValueOnce(reloadGate.promise);
+    const callsBeforeDelay = mockedFetchStories.mock.calls.length;
+
+    // Nothing yet — the reload is delayed, not immediate.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(mockedFetchStories.mock.calls.length).toBe(callsBeforeDelay);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4_000);
+    });
+    expect(mockedFetchStories.mock.calls.length).toBe(callsBeforeDelay + 1);
+  });
+
+  it("429 INGEST_COOLDOWN is a good-news phase, not a failure, and renders the server's message verbatim", async () => {
+    mockedFetchStories.mockResolvedValueOnce(sampleList);
+    renderProvider();
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("ready"));
+
+    const ingestGate = deferred<IngestResult>();
+    mockedRunIngest.mockReturnValueOnce(ingestGate.promise);
+
+    await act(async () => {
+      screen.getByRole("button", { name: "start" }).click();
+    });
+    expect(screen.getByTestId("ingest-phase")).toHaveTextContent("running");
+
+    const cooldownError = new ApiError({
+      kind: "api",
+      status: 429,
+      code: "INGEST_COOLDOWN",
+      message: "Already updated 3 minutes ago.",
+      url: "http://localhost:8000/api/ingest",
+      retryAfterSeconds: 720,
+    });
+    await act(async () => {
+      ingestGate.reject(cooldownError);
+      await ingestGate.promise.catch(() => {});
+    });
+
+    expect(screen.getByTestId("ingest-phase")).toHaveTextContent("cooldown");
+    expect(screen.getByTestId("ingest-phase")).not.toHaveTextContent("failed");
+    expect(screen.getByTestId("ingest-error")).toHaveTextContent("");
+    expect(screen.getByTestId("ingest-message")).toHaveTextContent(
+      "Already updated 3 minutes ago.",
     );
   });
 });

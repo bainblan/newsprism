@@ -14,6 +14,7 @@ that was told out-of-range is safe.
 from __future__ import annotations
 
 import logging
+import math
 import secrets
 
 from fastapi import APIRouter, Depends, Header, Query
@@ -21,9 +22,22 @@ from fastapi import APIRouter, Depends, Header, Query
 from . import store
 from .config import settings
 from .db import article_count, init_db
-from .errors import internal, no_data, not_found, unauthorized
+from .errors import (
+    ingest_cooldown,
+    ingest_in_progress,
+    internal,
+    no_data,
+    not_found,
+    unauthorized,
+)
 from .outlets import OUTLETS
-from .pipeline import mark_ingest_time, run_ingest
+from .pipeline import (
+    last_ingest_at,
+    mark_ingest_time,
+    release_ingest_lock,
+    run_ingest,
+    try_acquire_ingest_lock,
+)
 from .schemas import (
     ErrorResponse,
     IngestResponse,
@@ -31,7 +45,7 @@ from .schemas import (
     StoriesResponse,
     StoryResponse,
 )
-from .timeutil import now_iso_z
+from .timeutil import now_iso_z, parse_iso_z, utcnow
 
 log = logging.getLogger("newsprism.routes")
 
@@ -54,6 +68,8 @@ STORY_ERROR_RESPONSES = {
 INGEST_ERROR_RESPONSES = {
     **ERROR_RESPONSES,
     401: {"model": ErrorResponse, "description": "UNAUTHORIZED"},
+    409: {"model": ErrorResponse, "description": "INGEST_IN_PROGRESS"},
+    429: {"model": ErrorResponse, "description": "INGEST_COOLDOWN"},
 }
 
 
@@ -63,27 +79,38 @@ def _clamp(value: int, low: int, high: int) -> int:
 
 def require_ingest_token(
     x_ingest_token: str | None = Header(default=None, alias="X-Ingest-Token"),
-) -> None:
-    """Gate for ``POST /api/ingest`` only (contract v1.2).
+) -> bool:
+    """Gate for ``POST /api/ingest`` only. Narrowed meaning in contract v1.3.
 
-    A missing header and a wrong one must be indistinguishable, so both fall
-    through to the same comparison and the same error - never reveal whether
-    a token is even configured. Comparing UTF-8 *bytes* rather than the raw
-    ``str`` sidesteps ``secrets.compare_digest``'s refusal to compare
-    non-ASCII ``str`` values (it raises ``TypeError`` on those), so a garbage
-    header value produces a clean 401 rather than an unhandled 500. Any
-    ``str`` encodes to UTF-8 without raising, so this is exception-free.
+    Returns whether the caller presented a *valid* token, which the route
+    body uses to decide whether the cooldown applies - the lock applies
+    regardless. A **missing** header is now anonymous-and-allowed (v1.2 made
+    it a hard 401 when a token was configured; v1.3 reverses that, since the
+    server now bounds anonymous callers itself via cooldown + lock). A
+    **present but invalid** header stays a hard 401, since a broken token
+    must surface as a failed `curl -f` from the cron rather than silently
+    degrading to a bounded anonymous request.
 
-    Wired in as a FastAPI dependency (not a statement inside the route body)
-    so a rejected request runs before, and instead of, ``run_ingest()`` -
-    structurally, not just by call order.
+    Comparing UTF-8 *bytes* rather than the raw ``str`` sidesteps
+    ``secrets.compare_digest``'s refusal to compare non-ASCII ``str`` values
+    (it raises ``TypeError`` on those), so a garbage header value produces a
+    clean 401 rather than an unhandled 500. Any ``str`` encodes to UTF-8
+    without raising, so this is exception-free.
+
+    Wired in as a route parameter dependency (not a bare ``dependencies=``
+    entry) so a rejected request still runs before, and instead of,
+    ``run_ingest()`` - structurally, not just by call order - while the
+    validity result is available to the route body for the cooldown check.
     """
     expected = settings.ingest_token
     if not expected:
-        return  # unset token = open endpoint, per the contract
+        return False  # unset token = every caller is anonymous and bounded
     candidate = x_ingest_token or ""
+    if not candidate:
+        return False  # no header at all = anonymous and bounded, per v1.3
     if not secrets.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8")):
         raise unauthorized("Missing or invalid X-Ingest-Token header.")
+    return True
 
 
 @router.get("/stories", response_model=StoriesResponse, responses=ERROR_RESPONSES)
@@ -163,33 +190,117 @@ def get_story(story_id: str) -> StoryResponse:
     return StoryResponse(story=story)
 
 
+def _describe_elapsed(seconds: float) -> str:
+    """Plain-language "how recently" for the cooldown message.
+
+    The contract requires this be renderable verbatim by the frontend, so it
+    is prose, not a duration format.
+    """
+    minutes = int(seconds // 60)
+    if minutes < 1:
+        return "less than a minute ago"
+    if minutes == 1:
+        return "1 minute ago"
+    return f"{minutes} minutes ago"
+
+
+def _describe_wait(seconds: int) -> str:
+    """Plain-language "how much longer" for the cooldown message.
+
+    Forward-looking counterpart to ``_describe_elapsed``. The numeric
+    ``Retry-After`` header stays an exact second count for machines; this is
+    only the human sentence, and a bare seconds count ("in 884 seconds") is
+    not something anyone says aloud - it reads as a number to do arithmetic
+    on, not as information. Rounds *up* to the minute so the message never
+    promises a shorter wait than actually remains.
+    """
+    if seconds < 60:
+        return "less than a minute"
+    minutes = math.ceil(seconds / 60)
+    if minutes == 1:
+        return "about a minute"
+    return f"about {minutes} minutes"
+
+
+def _check_cooldown() -> None:
+    """Raise 429 INGEST_COOLDOWN if the last successful run was too recent.
+
+    Only reached for anonymous callers - a valid token bypasses this
+    entirely (see the route body). Silently proceeds if there is no
+    recorded last-ingest time, or if it fails to parse: this is a
+    convenience limit on top of the absolute lock below, not a safety
+    property, so failing open here is the right default.
+    """
+    last = last_ingest_at()
+    if last is None:
+        return
+    last_dt = parse_iso_z(last)
+    if last_dt is None:
+        return
+    elapsed = (utcnow() - last_dt).total_seconds()
+    remaining = settings.ingest_cooldown_seconds - elapsed
+    if remaining <= 0:
+        return
+    retry_after = max(1, math.ceil(remaining))
+    raise ingest_cooldown(
+        f"The last ingest run finished {_describe_elapsed(elapsed)}. "
+        f"Please try again in {_describe_wait(retry_after)}.",
+        retry_after,
+    )
+
+
 @router.post(
     "/ingest",
     response_model=IngestResponse,
     responses=INGEST_ERROR_RESPONSES,
-    dependencies=[Depends(require_ingest_token)],
 )
-def ingest() -> IngestResponse:
-    try:
-        result = run_ingest()
-    except Exception:
-        log.exception("ingest: run failed")
-        raise internal("The ingest run failed.") from None
+def ingest(token_is_valid: bool = Depends(require_ingest_token)) -> IngestResponse:
+    """Enforced in this exact order (contract v1.3):
 
-    if result["feeds_succeeded"] == 0:
-        # Partial failure is success, per the contract - but total failure
-        # leaves nothing to show, so it reports as NO_DATA rather than as a
-        # 200 that claims a successful run.
-        raise no_data(
-            f"All {result['feeds_attempted']} feeds failed; nothing was ingested."
+    1. Invalid token -> 401, via the ``require_ingest_token`` dependency,
+       which runs before this body at all - always first, regardless of
+       cooldown or lock state.
+    2. Cooldown -> 429, skipped entirely when the caller presented a valid
+       token. This is policy: a token buys permission to ask more often.
+    3. Single-flight lock -> 409, for *every* caller including a valid
+       token. This is physics: two concurrent runs OOM the host, and no
+       amount of authorization changes that.
+    """
+    if not token_is_valid:
+        _check_cooldown()
+
+    if not try_acquire_ingest_lock():
+        raise ingest_in_progress(
+            "An ingest run is already in progress. Please wait for it to finish."
         )
 
     try:
-        mark_ingest_time()
-    except Exception:  # noqa: BLE001 - bookkeeping only, never fail the run
-        log.warning("ingest: could not record last-ingest timestamp", exc_info=True)
+        try:
+            result = run_ingest()
+        except Exception:
+            log.exception("ingest: run failed")
+            raise internal("The ingest run failed.") from None
 
-    return IngestResponse(**result)
+        if result["feeds_succeeded"] == 0:
+            # Partial failure is success, per the contract - but total
+            # failure leaves nothing to show, so it reports as NO_DATA
+            # rather than as a 200 that claims a successful run.
+            raise no_data(
+                f"All {result['feeds_attempted']} feeds failed; nothing was ingested."
+            )
+
+        try:
+            mark_ingest_time()
+        except Exception:  # noqa: BLE001 - bookkeeping only, never fail the run
+            log.warning("ingest: could not record last-ingest timestamp", exc_info=True)
+
+        return IngestResponse(**result)
+    finally:
+        # Every exit path - success, the internal-error re-raise, and the
+        # total-feed-failure 503 - must release the lock. A leaked lock
+        # wedges POST /api/ingest until the process restarts, which is a
+        # worse outage than the one this lock exists to prevent.
+        release_ingest_lock()
 
 
 @router.get("/outlets", response_model=OutletsResponse, responses=ERROR_RESPONSES)

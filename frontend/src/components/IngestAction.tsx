@@ -49,7 +49,7 @@ export function IngestAction({
           {busy ? "Updating…" : idleLabel}
         </button>
 
-        {ingest.phase === "done" || ingest.phase === "failed" ? (
+        {DISMISSABLE_PHASES.has(ingest.phase) ? (
           <button
             type="button"
             onClick={dismissIngest}
@@ -64,10 +64,21 @@ export function IngestAction({
       {ingest.phase === "done" && ingest.result ? (
         <IngestSummary />
       ) : null}
+      {ingest.phase === "in_progress" ? <IngestInProgress /> : null}
+      {ingest.phase === "cooldown" ? <IngestCooldown /> : null}
+      {ingest.phase === "timed_out" ? <IngestStillRunning /> : null}
       {ingest.phase === "failed" ? <IngestFailure /> : null}
     </div>
   );
 }
+
+const DISMISSABLE_PHASES = new Set([
+  "done",
+  "failed",
+  "in_progress",
+  "cooldown",
+  "timed_out",
+]);
 
 function IngestProgress() {
   const { ingest } = useStories();
@@ -161,11 +172,67 @@ function IngestSummary() {
   );
 }
 
+/** 409 INGEST_IN_PROGRESS. Someone else's run is already going — good news,
+ * not a failure — so this reads nothing like IngestFailure below. */
+function IngestInProgress() {
+  const { ingest } = useStories();
+
+  return (
+    <div
+      role="status"
+      className="mt-4 max-w-2xl rounded-md border border-border bg-surface-muted p-4"
+    >
+      <p className="text-sm font-medium text-foreground">Already updating</p>
+      <p className="mt-1 text-sm text-muted">{ingest.message}</p>
+      <p className="mt-1 text-xs text-subtle">
+        Ingest can take several minutes on the live host, so this almost
+        certainly won&apos;t be done yet. Check back in a bit and reload to
+        see the result.
+      </p>
+    </div>
+  );
+}
+
+/** 429 INGEST_COOLDOWN. A run finished too recently to bother repeating —
+ * also good news, since it means the data is already fresh. */
+function IngestCooldown() {
+  const { ingest } = useStories();
+
+  return (
+    <div
+      role="status"
+      className="mt-4 max-w-2xl rounded-md border border-border bg-surface-muted p-4"
+    >
+      <p className="text-sm font-medium text-foreground">Already up to date</p>
+      <p className="mt-1 text-sm text-muted">{ingest.message}</p>
+    </div>
+  );
+}
+
+/** Client-side timeout. The run continues on the backend; this is not a
+ * failure, just the browser giving up on waiting for a response. */
+function IngestStillRunning() {
+  const { ingest } = useStories();
+
+  return (
+    <div
+      role="status"
+      className="mt-4 max-w-2xl rounded-md border border-border bg-surface-muted p-4"
+    >
+      <p className="text-sm font-medium text-foreground">Still running</p>
+      <p className="mt-1 text-sm text-muted">{ingest.message}</p>
+    </div>
+  );
+}
+
 function IngestFailure() {
   const { ingest, startIngest } = useStories();
 
   return (
-    <div className="mt-4 max-w-2xl rounded-md border border-border bg-surface-muted p-4">
+    <div
+      role="alert"
+      className="mt-4 max-w-2xl rounded-md border border-border bg-surface-muted p-4"
+    >
       <p className="text-sm font-medium text-foreground">Ingest failed</p>
       <p className="mt-1 text-sm text-muted">{ingest.error}</p>
       <button

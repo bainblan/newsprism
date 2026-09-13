@@ -13,7 +13,6 @@ import { IngestAction } from "@/components/IngestAction";
 import { SpectrumKey } from "@/components/SpectrumKey";
 import { StoryCard } from "@/components/StoryCard";
 import { useStories } from "@/components/StoriesProvider";
-import { SHOW_INGEST_CONTROL } from "@/lib/config";
 import { formatDateTime, formatRelativeTime } from "@/lib/format";
 import type { StoriesResponse } from "@/lib/types";
 
@@ -46,11 +45,9 @@ export function StoryList({ data }: { data: StoriesResponse }) {
           </button>
         </div>
 
-        {SHOW_INGEST_CONTROL ? (
-          <div className="mt-4">
-            <IngestAction tone="secondary" idleLabel="Update news" />
-          </div>
-        ) : null}
+        <div className="mt-4">
+          <IngestAction tone="secondary" idleLabel="Update news" />
+        </div>
       </div>
 
       <div className="border-b border-border py-4">

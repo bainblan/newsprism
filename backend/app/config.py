@@ -79,6 +79,9 @@ class Settings:
     ingest_token: str = field(
         default_factory=lambda: _env_str("NEWSPRISM_INGEST_TOKEN", "")
     )
+    ingest_cooldown_seconds: int = field(
+        default_factory=lambda: _env_int("NEWSPRISM_INGEST_COOLDOWN_SECONDS", 900)
+    )
 
 
 settings = Settings()

@@ -1,8 +1,9 @@
 /**
- * components/StoryList.tsx — the populated-list header's ingest control,
- * gated behind NEXT_PUBLIC_SHOW_INGEST_CONTROL (contract v1.2). Same mocking
- * approach as StateViews.test.tsx: `@/lib/config` mocked with a mutable
- * getter so both branches of the build-time flag are exercised in one file.
+ * components/StoryList.tsx — the populated-list header's ingest control.
+ *
+ * NEXT_PUBLIC_SHOW_INGEST_CONTROL was retired in contract v1.3 (the server now
+ * bounds ingest work itself), so the control is unconditional. This confirms
+ * it renders with no env var set at all.
  */
 
 import { render, screen } from "@testing-library/react";
@@ -12,18 +13,6 @@ import { StoryList } from "@/components/StoryList";
 import { useStories } from "@/components/StoriesProvider";
 import { makeStory } from "@/test/fixtures";
 import type { StoriesResponse } from "@/lib/types";
-
-const configState = vi.hoisted(() => ({ showIngestControl: false }));
-
-vi.mock("@/lib/config", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/lib/config")>();
-  return {
-    ...actual,
-    get SHOW_INGEST_CONTROL() {
-      return configState.showIngestControl;
-    },
-  };
-});
 
 vi.mock("@/components/StoriesProvider", async (importOriginal) => {
   const actual =
@@ -43,7 +32,13 @@ function idleContext(): ReturnType<typeof useStories> {
     state: { status: "ready", data: sampleData },
     isRefreshing: false,
     refresh: vi.fn(),
-    ingest: { phase: "idle", elapsedMs: 0, result: null, error: null },
+    ingest: {
+      phase: "idle",
+      elapsedMs: 0,
+      result: null,
+      error: null,
+      message: null,
+    },
     startIngest: vi.fn(),
     dismissIngest: vi.fn(),
     apiBaseUrl: "http://localhost:8000",
@@ -52,24 +47,10 @@ function idleContext(): ReturnType<typeof useStories> {
 
 describe("StoryList header", () => {
   afterEach(() => {
-    configState.showIngestControl = false;
     vi.clearAllMocks();
   });
 
-  it("flag off (default): hides the ingest control, keeps Reload", () => {
-    mockedUseStories.mockReturnValue(idleContext());
-    render(<StoryList data={sampleData} />);
-
-    expect(
-      screen.queryByRole("button", { name: /update news/i }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /reload/i }),
-    ).toBeInTheDocument();
-  });
-
-  it("flag on: shows the ingest control alongside Reload", () => {
-    configState.showIngestControl = true;
+  it("shows the ingest control alongside Reload with no env var set", () => {
     mockedUseStories.mockReturnValue(idleContext());
     render(<StoryList data={sampleData} />);
 
