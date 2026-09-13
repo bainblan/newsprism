@@ -54,14 +54,49 @@ compared against a browser `Origin` header. A private hostname is wrong for
 both. The cron job *does* use the private network, because its client is the
 cron container rather than a browser — which is why it needs no manual URL.
 
+## Ingest is authenticated
+
+`POST /api/ingest` requires a shared secret in an `X-Ingest-Token` header. It
+starts a multi-minute, CPU-bound run on half a CPU, so an open endpoint is an
+availability hole rather than a billing one: anyone with the URL can start
+unbounded runs and make the site unresponsive for everyone else.
+
+The blueprint wires this with no typing. `newsprism-api` declares the variable
+with `generateValue: true`, and `newsprism-ingest` reads *the same variable off
+that service* via `fromService: { envVarKey: NEWSPRISM_INGEST_TOKEN }` — the
+one form of `fromService` that copies a value instead of a hostname. The secret
+therefore exists in exactly one place and is never pasted anywhere.
+
+**On a deployment that predates this change, the variable does not appear by
+itself.** `generateValue` fires when a service is created. Sync the blueprint
+from the dashboard so Render picks up both new entries; if no value is
+generated on the API, set one there by hand (any long random string) and sync
+again so the cron inherits it. Then confirm with the health check below and by
+running the cron job manually once.
+
+**When the variable is unset the endpoint stays open**, so that a fresh clone
+works with no configuration. That is the wrong state for a deployment, and it
+is visible from outside: `GET /api/health` reports `"ingest_protected"`.
+
+The browser is not an ingest client. `NEXT_PUBLIC_*` values are compiled into
+the JavaScript bundle, so the frontend cannot hold this secret — the ingest
+button is hidden unless `NEXT_PUBLIC_SHOW_INGEST_CONTROL=true`, which is for
+local development only and must never be set on `newsprism-web`.
+
 ## First data
 
 A fresh deploy has an empty database and `GET /api/stories` returns
-`503 NO_DATA`. Either wait for the cron job, or trigger one immediately:
+`503 NO_DATA`. Either wait for the cron job, or trigger one immediately — with
+the token, which you read from the `newsprism-api` service's environment in the
+dashboard:
 
 ```
-curl -X POST https://newsprism-api.onrender.com/api/ingest --max-time 3600
+curl -X POST https://newsprism-api-7651.onrender.com/api/ingest   -H "X-Ingest-Token: $NEWSPRISM_INGEST_TOKEN" --max-time 3600
 ```
+
+Note the hostname: the API is **`newsprism-api-7651`**. `newsprism-api` was
+taken globally and belongs to an unrelated project that also answers on
+`/api/*` — see CLAUDE.md. Read the URL off the dashboard, never guess it.
 
 Expect **several minutes** on half a CPU — the 63.9 s measured on a dev machine
 is a floor, not an estimate. Render allows up to 100 minutes for a response, so
@@ -69,9 +104,16 @@ a slow ingest is not a timeout risk; the `--max-time` above is the binding one.
 
 ## Verifying it actually worked
 
-`GET /api/health` returns `{"status": "ok", "clusterer": "onnx"}` — but note
-that field reports the **configured** value from the environment, not the
-clusterer that was actually constructed. It cannot detect a runtime fallback.
+`GET /api/health` returns `{"status": "ok", "clusterer": "onnx",
+"ingest_protected": "true"}`.
+
+`ingest_protected` is the one field here that tells the truth about runtime
+state: `"false"` means `NEWSPRISM_INGEST_TOKEN` is unset and anyone can start
+an ingest run. Check it after any blueprint change.
+
+`clusterer` does **not** work that way — it reports the **configured** value
+from the environment, not the clusterer that was actually constructed, so it
+cannot detect a runtime fallback.
 
 To confirm real clustering, read the ingest logs for:
 

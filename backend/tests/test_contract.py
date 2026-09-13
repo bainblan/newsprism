@@ -23,7 +23,8 @@ os.environ["NEWSPRISM_CLUSTERER"] = "tfidf"  # no model download in tests
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import store  # noqa: E402
+from app import routes, store  # noqa: E402
+from app import main as app_main  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.db import connect, init_db  # noqa: E402
 from app.main import app  # noqa: E402
@@ -62,6 +63,36 @@ def client():
     init_db()
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture()
+def ingest_token():
+    """Let a test set/clear ``settings.ingest_token`` and restore it after.
+
+    ``Settings`` is a frozen dataclass (deliberately - see app/config.py), so
+    a plain ``monkeypatch.setattr(settings, ...)`` would raise
+    ``FrozenInstanceError``. ``object.__setattr__`` bypasses that at the
+    single mutable instance the app already treats as a singleton; this
+    fixture is the only place that should ever do it.
+    """
+    original = settings.ingest_token
+
+    def _set(value: str) -> None:
+        object.__setattr__(settings, "ingest_token", value)
+
+    yield _set
+    object.__setattr__(settings, "ingest_token", original)
+
+
+_FAKE_INGEST_RESULT = {
+    "feeds_attempted": 1,
+    "feeds_succeeded": 1,
+    "feeds_failed": [],
+    "articles_ingested": 0,
+    "articles_new": 0,
+    "clusters_formed": 0,
+    "duration_seconds": 0.1,
+}
 
 
 def _seed(n_left: int = 2, n_right: int = 1) -> str:
@@ -656,6 +687,127 @@ def test_empty_feed_counts_as_a_failure_not_a_silent_success():
     body = b"""<?xml version="1.0"?><rss version="2.0"><channel>
       <title>Empty</title></channel></rss>"""
     assert parse_feed(OUTLETS[0], body) == []
+
+
+# --------------------------------------------------------------------------
+# POST /api/ingest — shared-secret auth (contract v1.2)
+# --------------------------------------------------------------------------
+
+
+def test_ingest_open_when_token_unset(client, monkeypatch, ingest_token):
+    ingest_token("")
+    calls = []
+    monkeypatch.setattr(routes, "run_ingest", lambda: calls.append(1) or _FAKE_INGEST_RESULT)
+
+    response = client.post("/api/ingest")
+
+    assert response.status_code == 200
+    assert calls == [1]
+
+
+def test_ingest_configured_token_correct_header_proceeds(client, monkeypatch, ingest_token):
+    ingest_token("s3cr3t-value")
+    calls = []
+    monkeypatch.setattr(routes, "run_ingest", lambda: calls.append(1) or _FAKE_INGEST_RESULT)
+
+    response = client.post("/api/ingest", headers={"X-Ingest-Token": "s3cr3t-value"})
+
+    assert response.status_code == 200
+    assert calls == [1]
+
+
+def test_ingest_configured_token_missing_header_is_401(client, monkeypatch, ingest_token):
+    ingest_token("s3cr3t-value")
+    monkeypatch.setattr(routes, "run_ingest", lambda: pytest.fail("run_ingest must not run"))
+
+    response = client.post("/api/ingest")
+
+    assert response.status_code == 401
+    body = response.json()
+    assert body["error"]["code"] == "UNAUTHORIZED"
+
+
+def test_ingest_missing_and_wrong_token_responses_are_identical(client, monkeypatch, ingest_token):
+    """A missing token and a wrong one must be indistinguishable to the caller."""
+    ingest_token("s3cr3t-value")
+    monkeypatch.setattr(routes, "run_ingest", lambda: pytest.fail("run_ingest must not run"))
+
+    missing = client.post("/api/ingest")
+    wrong = client.post("/api/ingest", headers={"X-Ingest-Token": "wrong-value"})
+
+    assert missing.status_code == wrong.status_code == 401
+    assert missing.json() == wrong.json()
+
+
+def test_ingest_non_ascii_header_is_401_not_500(client, monkeypatch, ingest_token):
+    """secrets.compare_digest raises TypeError on non-ASCII str; must not surface as 500.
+
+    httpx's own header encoder only accepts plain ASCII for a ``str`` header
+    value (raising ``UnicodeEncodeError`` itself for anything else), so the
+    non-ASCII bytes are passed pre-encoded to get past the test client and
+    exercise the app's own decoding/comparison path instead of httpx's.
+    """
+    ingest_token("s3cr3t-value")
+    monkeypatch.setattr(routes, "run_ingest", lambda: pytest.fail("run_ingest must not run"))
+
+    response = client.post(
+        "/api/ingest", headers={"X-Ingest-Token": "ñøn-ascii-🔥".encode("utf-8")}
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "UNAUTHORIZED"
+
+
+def test_ingest_rejected_request_never_calls_run_ingest(client, monkeypatch, ingest_token):
+    """The security property itself, not just the status code."""
+    ingest_token("s3cr3t-value")
+    calls = []
+    monkeypatch.setattr(routes, "run_ingest", lambda: calls.append(1) or _FAKE_INGEST_RESULT)
+
+    client.post("/api/ingest", headers={"X-Ingest-Token": "wrong-value"})
+
+    assert calls == []
+
+
+def test_token_configured_read_routes_unaffected_without_header(client, ingest_token):
+    """The gate must be scoped to POST /api/ingest alone, not the whole router.
+
+    Every other auth test configures a token and then only ever calls
+    /api/ingest; every other test in this file calls read routes with no
+    token configured at all. That leaves a real gap: nothing proves
+    `require_ingest_token` is wired to the ingest route specifically rather
+    than to the router or the app. If `Depends(require_ingest_token)` ever
+    migrated to `APIRouter(...)` or `app.include_router(...)` - a plausible
+    edit if a second protected route were added later - every read endpoint
+    below would start 401ing for every visitor while the rest of the suite
+    stayed green. This test sets a real token, sends no header at all, and
+    asserts the read routes behave exactly as if no token were configured.
+    """
+    ingest_token("s3cr3t-value")
+
+    stories = client.get("/api/stories")
+    assert stories.status_code != 401
+    assert stories.status_code == 503  # cold DB, unrelated to auth
+
+    story_lookup = client.get("/api/stories/s_does_not_exist")
+    assert story_lookup.status_code != 401
+    assert story_lookup.status_code == 503  # cold DB check runs before NOT_FOUND
+
+    outlets = client.get("/api/outlets")
+    assert outlets.status_code != 401
+    assert outlets.status_code == 200
+
+    health = client.get("/api/health")
+    assert health.status_code != 401
+    assert health.status_code == 200
+
+
+def test_health_reports_ingest_protected_state(ingest_token):
+    ingest_token("")
+    assert app_main.health()["ingest_protected"] == "false"
+
+    ingest_token("s3cr3t-value")
+    assert app_main.health()["ingest_protected"] == "true"
 
 
 def test_dedupe_collapses_the_same_url_across_feeds():

@@ -51,6 +51,13 @@ async def lifespan(_: FastAPI):
         getattr(clusterer, "similarity_threshold", "n/a"),
     )
     log.info("CORS origins: %s", ", ".join(settings.cors_origins))
+    if settings.ingest_token:
+        log.info("POST /api/ingest is protected by NEWSPRISM_INGEST_TOKEN")
+    else:
+        log.warning(
+            "NEWSPRISM_INGEST_TOKEN is unset - POST /api/ingest is UNAUTHENTICATED "
+            "and open to anyone who can reach this host"
+        )
     yield
 
 
@@ -121,5 +128,16 @@ def unhandled_exception_handler(request: Request, exc: Exception) -> JSONRespons
 
 @app.get("/api/health", include_in_schema=False)
 def health() -> dict[str, str]:
-    """Additive to the contract; nothing in the frontend depends on it."""
-    return {"status": "ok", "clusterer": settings.clusterer}
+    """Additive to the contract; nothing in the frontend depends on it.
+
+    ``ingest_protected`` is deliberately the string "true"/"false", not a
+    JSON boolean - kept as ``dict[str, str]`` (unchanged from before this
+    field was added) rather than widening the return type, since every other
+    value here is already a plain string and the contract only asks that the
+    state be externally checkable, not that it be typed as a bool.
+    """
+    return {
+        "status": "ok",
+        "clusterer": settings.clusterer,
+        "ingest_protected": "true" if settings.ingest_token else "false",
+    }

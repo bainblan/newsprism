@@ -8,7 +8,7 @@
 
 import { IngestAction } from "@/components/IngestAction";
 import { useStories } from "@/components/StoriesProvider";
-import { USE_MOCK_DATA } from "@/lib/config";
+import { SHOW_INGEST_CONTROL, USE_MOCK_DATA } from "@/lib/config";
 
 function Panel({
   title,
@@ -38,18 +38,21 @@ export function NoDataState({ message }: { message: string }) {
   return (
     <Panel title="No stories yet">
       <p>
-        The database is empty — nothing has been ingested on this machine. An
-        ingest run fetches the front page of around twenty news feeds across the
+        Newsprism reads the front page of around twenty news outlets across the
         political spectrum, groups the articles that describe the same event,
-        and works out how each story&apos;s coverage is distributed.
+        and works out how each story&apos;s coverage is distributed. Nothing has
+        been ingested yet, so there is nothing to show.
       </p>
       <p>
-        It takes roughly 30 to 60 seconds, because it is waiting on the news
-        sites rather than on anything local.
+        {SHOW_INGEST_CONTROL
+          ? "An ingest run takes roughly 30 to 60 seconds, because it is waiting on the news sites rather than on anything local."
+          : "This refills on its own roughly every six hours — check back shortly and stories will appear once the next run completes."}
       </p>
-      <div className="pt-2">
-        <IngestAction tone="primary" idleLabel="Get the news" />
-      </div>
+      {SHOW_INGEST_CONTROL ? (
+        <div className="pt-2">
+          <IngestAction tone="primary" idleLabel="Get the news" />
+        </div>
+      ) : null}
       <p className="border-t border-border pt-4 text-xs text-subtle">
         Backend reported <code className="font-mono">503 NO_DATA</code>
         {message ? `: ${message}` : "."}
@@ -175,7 +178,10 @@ export function EmptyStoriesState() {
       </p>
       <p>
         That usually means the last ingest run pulled very little — either it
-        has only run once, or most feeds failed.
+        has only run once, or most feeds failed.{" "}
+        {SHOW_INGEST_CONTROL
+          ? ""
+          : "This refills automatically roughly every six hours — reload in a bit to check for new coverage."}
       </p>
       <div className="flex flex-wrap items-start gap-3 pt-2">
         <button
@@ -187,9 +193,11 @@ export function EmptyStoriesState() {
           {isRefreshing ? "Reloading…" : "Reload"}
         </button>
       </div>
-      <div className="pt-1">
-        <IngestAction tone="primary" idleLabel="Update news" />
-      </div>
+      {SHOW_INGEST_CONTROL ? (
+        <div className="pt-1">
+          <IngestAction tone="primary" idleLabel="Update news" />
+        </div>
+      ) : null}
     </Panel>
   );
 }

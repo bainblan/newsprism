@@ -25,6 +25,19 @@ export type MockScenario = "stories" | "no_data" | "empty" | "error" | "offline"
 export const MOCK_SCENARIO: MockScenario =
   (process.env.NEXT_PUBLIC_MOCK_SCENARIO as MockScenario) || "stories";
 
+/**
+ * Whether the browser is allowed to offer a "run ingest" control at all.
+ *
+ * `POST /api/ingest` sits behind a shared secret (v1.2 of the contract) that a
+ * `NEXT_PUBLIC_*` value can never hold, because Next inlines it into the JS
+ * bundle anyone can read. There is no version of this where a public button
+ * and a closed endpoint both exist, so a deployed instance must ship with this
+ * off. Default is off: anything other than the exact string "true" hides the
+ * control, because the unsafe state is the deployed one.
+ */
+export const SHOW_INGEST_CONTROL =
+  process.env.NEXT_PUBLIC_SHOW_INGEST_CONTROL === "true";
+
 /** Request timeouts, ms. Ingest is synchronous for v1 and may take 30-60s. */
 export const READ_TIMEOUT_MS = 15_000;
 export const INGEST_TIMEOUT_MS = 180_000;

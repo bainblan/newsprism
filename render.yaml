@@ -48,6 +48,16 @@ services:
       # origin with scheme and no trailing slash.
       - key: NEWSPRISM_CORS_ORIGINS
         sync: false
+      # Shared secret for POST /api/ingest, required in an X-Ingest-Token
+      # header. Ingest is a multi-minute, CPU-bound run on half a CPU, so an
+      # open endpoint is an availability hole: anyone with the URL can start
+      # unbounded runs. Render generates the value; the cron job below reads
+      # the same variable off this service, so nothing is typed by hand.
+      #
+      # Leaving this UNSET leaves ingest open. Check from outside the box:
+      # GET /api/health reports "ingest_protected".
+      - key: NEWSPRISM_INGEST_TOKEN
+        generateValue: true
 
   # --- Frontend ------------------------------------------------------------
   # Free is fine here: no disk, low memory, and all data fetching is
@@ -71,6 +81,12 @@ services:
       # the JavaScript. See docs/deploy.md.
       - key: NEXT_PUBLIC_API_URL
         sync: false
+      #
+      # NEXT_PUBLIC_SHOW_INGEST_CONTROL is deliberately ABSENT. It reveals the
+      # ingest button, and POST /api/ingest now requires a secret that a
+      # NEXT_PUBLIC_* value cannot hold -- anything inlined into the bundle is
+      # public. Setting it here would ship a button that 401s for every
+      # visitor. It is a local-development flag only.
 
   # --- Scheduled ingest ----------------------------------------------------
   # A disk cannot be attached to a cron job, so this cannot write the database
@@ -87,7 +103,8 @@ services:
   # a CPU: expect several minutes, not the 64s measured on a dev machine.
   # Render allows up to 100 minutes for an HTTP response, so the timeout here
   # is the binding one. -f makes an HTTP error a failed job rather than a
-  # silent success.
+  # silent success -- including a 401, so a broken token shows up as a failed
+  # cron run rather than as a site that quietly stops updating.
   - name: newsprism-ingest
     type: cron
     runtime: image
@@ -97,10 +114,21 @@ services:
     image:
       url: docker.io/curlimages/curl:8.22.0
     dockerCommand: >-
-      curl -fsS --max-time 3600 -X POST "http://$INGEST_TARGET/api/ingest"
+      curl -fsS --max-time 3600 -X POST
+      -H "X-Ingest-Token: $NEWSPRISM_INGEST_TOKEN"
+      "http://$INGEST_TARGET/api/ingest"
     envVars:
       - key: INGEST_TARGET
         fromService:
           name: newsprism-api
           type: web
           property: hostport
+      # Pulls the generated secret straight off the API service. `envVarKey`
+      # is the one form of `fromService` that copies a value rather than a
+      # hostname, so the token is never stored in two places and never typed
+      # into the dashboard.
+      - key: NEWSPRISM_INGEST_TOKEN
+        fromService:
+          name: newsprism-api
+          type: web
+          envVarKey: NEWSPRISM_INGEST_TOKEN

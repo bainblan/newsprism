@@ -1,4 +1,4 @@
-# API Contract — v1.1 (slice 1 + story lookup)
+# API Contract — v1.2 (slice 1 + story lookup + ingest auth)
 
 **Status:** frozen. Neither the frontend nor the backend agent may change this
 unilaterally. If it is unworkable, stop and report to the Architect.
@@ -10,6 +10,14 @@ correctly around that gap, and the result was link rot. v1.1 closes it by
 adding an ID-stability guarantee, `GET /api/stories/{id}`, an `archived` flag,
 and a `404 NOT_FOUND` code. The v1 shapes are otherwise unchanged — `archived`
 is the only new field on an existing object.
+
+**Amended 2026-09-12 by the Architect (v1.1 → v1.2).** `POST /api/ingest` was
+public and unauthenticated — it is in the OpenAPI schema and a browser button
+called it directly, so anyone with the URL could start an unbounded number of
+multi-minute, CPU-bound runs on a half-CPU instance. This is an availability
+problem, not a billing one. v1.2 puts the endpoint behind a shared secret, adds
+`401 UNAUTHORIZED`, and removes the browser from the set of ingest clients. No
+response shape changes.
 
 The frontend and backend are built in parallel by agents who cannot see each
 other's work. This document is the only thing keeping the two halves compatible,
@@ -192,7 +200,31 @@ endpoint exists to answer.
 
 ## POST /api/ingest
 
-Triggers a fetch-and-cluster run. Synchronous for v1 — it may take 30–60s.
+Triggers a fetch-and-cluster run. Synchronous for v1 — it may take 30–60s on a
+dev machine, and several minutes on a half-CPU host.
+
+### Authentication (new in v1.2)
+
+The request must carry the shared secret in an `X-Ingest-Token` header:
+
+```
+X-Ingest-Token: <value of NEWSPRISM_INGEST_TOKEN>
+```
+
+- Compare in **constant time**. A missing token and a wrong token are
+  indistinguishable in the response: both are `401 UNAUTHORIZED` with the same
+  message. Never reveal whether a token is configured at all.
+- The check runs **before** any feed fetching or model work, so a rejected
+  request costs no CPU. That is the entire point of the change.
+- **When `NEWSPRISM_INGEST_TOKEN` is unset, the endpoint is open.** That keeps
+  a fresh clone working with zero configuration, and it is the wrong state for
+  a deployment — so it must be visible from outside the box, not only in the
+  source: the app logs a WARNING at startup and `GET /api/health` reports
+  `"ingest_protected": false`.
+- **The browser is not an ingest client.** `NEXT_PUBLIC_*` values are compiled
+  into the JavaScript bundle, so the frontend cannot hold this secret; there is
+  no version of this where a public ingest button and a closed endpoint both
+  exist. The scheduled job and an operator with `curl` are the only callers.
 
 **200 response**
 
@@ -231,6 +263,7 @@ Every non-2xx uses this envelope, with no exceptions:
 
 | Status | `code` | When |
 |---|---|---|
+| 401 | `UNAUTHORIZED` | `POST /api/ingest` without a valid `X-Ingest-Token`. |
 | 422 | `INVALID_PARAM` | Unparseable parameter (not out-of-range — those clamp) |
 | 404 | `NOT_FOUND` | A named resource does not exist. Currently only `GET /api/stories/{id}`. |
 | 503 | `NO_DATA` | Database is empty; ingest has never run |
@@ -240,9 +273,16 @@ Every non-2xx uses this envelope, with no exceptions:
 paths while v1's table did not list it, so this documents behaviour that
 existed rather than introducing it.
 
-The frontend must handle 503 `NO_DATA` as a first-class empty state with a
-"Run ingest" affordance, not as a crash. On a cold clone that is the **first**
-thing a user sees, so it is not an edge case.
+`UNAUTHORIZED` is new in v1.2 and applies to `POST /api/ingest` only. It is the
+one error code the frontend is not expected to render: the browser no longer
+calls that endpoint.
+
+The frontend must handle 503 `NO_DATA` as a first-class empty state, not as a
+crash. On a cold clone that is the **first** thing a user sees, so it is not an
+edge case. **Changed in v1.2:** the ingest affordance in that state is now
+conditional on `NEXT_PUBLIC_SHOW_INGEST_CONTROL`, so the empty state must read
+sensibly with no button in it — a deployed instance is refilled on a schedule,
+not by its visitors.
 
 ## Outlet list (Architect-owned)
 

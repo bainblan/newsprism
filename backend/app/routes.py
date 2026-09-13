@@ -14,12 +14,14 @@ that was told out-of-range is safe.
 from __future__ import annotations
 
 import logging
+import secrets
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Header, Query
 
 from . import store
+from .config import settings
 from .db import article_count, init_db
-from .errors import internal, no_data, not_found
+from .errors import internal, no_data, not_found, unauthorized
 from .outlets import OUTLETS
 from .pipeline import mark_ingest_time, run_ingest
 from .schemas import (
@@ -49,9 +51,39 @@ STORY_ERROR_RESPONSES = {
     404: {"model": ErrorResponse, "description": "NOT_FOUND"},
 }
 
+INGEST_ERROR_RESPONSES = {
+    **ERROR_RESPONSES,
+    401: {"model": ErrorResponse, "description": "UNAUTHORIZED"},
+}
+
 
 def _clamp(value: int, low: int, high: int) -> int:
     return max(low, min(high, value))
+
+
+def require_ingest_token(
+    x_ingest_token: str | None = Header(default=None, alias="X-Ingest-Token"),
+) -> None:
+    """Gate for ``POST /api/ingest`` only (contract v1.2).
+
+    A missing header and a wrong one must be indistinguishable, so both fall
+    through to the same comparison and the same error - never reveal whether
+    a token is even configured. Comparing UTF-8 *bytes* rather than the raw
+    ``str`` sidesteps ``secrets.compare_digest``'s refusal to compare
+    non-ASCII ``str`` values (it raises ``TypeError`` on those), so a garbage
+    header value produces a clean 401 rather than an unhandled 500. Any
+    ``str`` encodes to UTF-8 without raising, so this is exception-free.
+
+    Wired in as a FastAPI dependency (not a statement inside the route body)
+    so a rejected request runs before, and instead of, ``run_ingest()`` -
+    structurally, not just by call order.
+    """
+    expected = settings.ingest_token
+    if not expected:
+        return  # unset token = open endpoint, per the contract
+    candidate = x_ingest_token or ""
+    if not secrets.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8")):
+        raise unauthorized("Missing or invalid X-Ingest-Token header.")
 
 
 @router.get("/stories", response_model=StoriesResponse, responses=ERROR_RESPONSES)
@@ -131,7 +163,12 @@ def get_story(story_id: str) -> StoryResponse:
     return StoryResponse(story=story)
 
 
-@router.post("/ingest", response_model=IngestResponse, responses=ERROR_RESPONSES)
+@router.post(
+    "/ingest",
+    response_model=IngestResponse,
+    responses=INGEST_ERROR_RESPONSES,
+    dependencies=[Depends(require_ingest_token)],
+)
 def ingest() -> IngestResponse:
     try:
         result = run_ingest()

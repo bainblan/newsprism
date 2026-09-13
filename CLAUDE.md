@@ -43,6 +43,12 @@ and the group partition is byte-identical on both the 856-article window and the
 997-article full corpus, so the 0.62 threshold is untouched. Backend suite is 47
 tests. See `docs/onnx-migration.md`.
 
+Slice 1.4 — **ingest auth** — is built, verified, and closes the one thing that
+made the public link unsafe to share. `POST /api/ingest` was reachable by
+anyone: a multi-minute, CPU-bound run on half a CPU, discoverable in
+`/openapi.json`, with a browser button calling it directly. It now requires a
+shared secret. See "Ingest is closed" below.
+
 ```
 frontend/   Next.js 16, TypeScript, Tailwind, App Router, src/ dir
             *.test.ts(x) sit beside what they test; src/test/ holds fixtures
@@ -134,8 +140,8 @@ ranked list of what is worth testing. Architect-owned, like the API contract.
 
 | | |
 |---|---|
-| backend | 47 tests, `pytest`, offline against a temp SQLite file |
-| frontend | 68 tests, Vitest + React Testing Library + jsdom |
+| backend | 55 tests, `pytest`, offline against a temp SQLite file |
+| frontend | 77 tests, Vitest + React Testing Library + jsdom |
 | CI | `.github/workflows/ci.yml`, two parallel jobs |
 
 From `frontend/`: `npm run test` (watch), `test:run` (CI), `typecheck`, `lint`.
@@ -149,13 +155,10 @@ passes on a dev machine with a warm `.next/` and fails on a fresh checkout. This
 was written wrong the first time and caught before CI ever ran, by type-checking
 with the generated inputs excluded rather than by trusting a local green.
 
-**CI's first real run failed, and the failure was in the workflow, not the
-code.** Backend collection died with `ModuleNotFoundError: No module named
-'app'`. Cause: `python -m pytest` puts the CWD on `sys.path` and bare `pytest`
-does not — the suite had only ever been run locally the first way and CI ran it
-the second. Fixed with `pythonpath = .` in `backend/pytest.ini`, so either
-invocation works, rather than by pinning the workflow to one spelling. Both
-spellings are now worth running before trusting a local green.
+**Run the backend suite both ways before trusting a local green** — `python -m
+pytest` puts the CWD on `sys.path` and bare `pytest` does not. CI's first run
+died on exactly that; `pythonpath = .` in `backend/pytest.ini` fixes both
+spellings rather than pinning the workflow to one.
 
 **Tests were verified by mutation, not by watching them pass.** Five deliberate
 regressions were introduced one at a time and each had to fail the suite:
@@ -236,6 +239,46 @@ are never deleted, so a story keeps every article it ever had. `archived` means
 none of its articles are still in the window: it leaves the list but stays fully
 renderable, which is what makes an old link work rather than 404. A merge loser
 becomes a permanent alias, chains flattened, resolved with a depth cap.
+
+## Ingest is closed (slice 1.4)
+
+`POST /api/ingest` requires a shared secret in an `X-Ingest-Token` header,
+compared with `secrets.compare_digest` in a FastAPI **dependency** so the
+rejection happens before `run_ingest()` structurally, not by statement order.
+Missing and wrong tokens return byte-identical 401s — the API never says
+whether a token is configured.
+
+**The browser cannot be an ingest client.** `NEXT_PUBLIC_*` is inlined into the
+JS bundle, so the frontend can never hold this secret; there is no design where
+a public button and a closed endpoint coexist. The button is therefore gated
+behind `NEXT_PUBLIC_SHOW_INGEST_CONTROL`, **default off**, local dev only. The
+empty-state copy was rewritten so it reads correctly with no button in it — a
+deployed instance refills on a schedule, not by its visitors.
+
+**Unset token = open**, so a fresh clone still works with zero config. That is
+the wrong state for a deployment, so it is visible from outside rather than
+only in the source: `GET /api/health` reports `ingest_protected`.
+
+`render.yaml` wires the secret with nothing typed by hand — the API declares it
+`generateValue: true` and the cron reads *that service's variable* via
+`fromService: { envVarKey: ... }`, the one form of `fromService` that copies a
+value instead of a hostname. `curl -f` makes a bad token a failed cron run
+rather than a site that quietly stops updating.
+
+**Two mutations that escaped their own agent's first pass**, both found by
+demanding mutation proof rather than a green suite:
+
+- The backend's auth tests all set the token and then called only `/api/ingest`;
+  every other test ran with it unset. So **no test ever had the token
+  configured while calling a read endpoint**. Hoisting the dependency to
+  `include_router` — the natural edit when adding a second protected route —
+  401s every visitor on `/api/stories`, and all 54 tests stayed green. One test
+  now covers it; the mutation fails exactly that test and nothing else.
+- The frontend's component tests `vi.mock` the whole config module, so flipping
+  the flag's default to the unsafe direction (`!== "false"`) was **invisible to
+  every component test**. A test that imports the real module via `vi.stubEnv`
+  now catches it. Mocking the module that holds the decision means never
+  testing the decision.
 
 ## The contract
 
