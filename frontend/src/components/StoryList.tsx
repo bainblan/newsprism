@@ -46,7 +46,7 @@ export function StoryList({ data }: { data: StoriesResponse }) {
         </div>
 
         <div className="mt-4">
-          <IngestAction tone="secondary" idleLabel="Run ingest" />
+          <IngestAction tone="secondary" idleLabel="Update news" />
         </div>
       </div>
 

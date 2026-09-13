@@ -27,7 +27,7 @@ const buttonTone = {
 
 export function IngestAction({
   tone = "primary",
-  idleLabel = "Run ingest",
+  idleLabel = "Update news",
 }: {
   tone?: keyof typeof buttonTone;
   idleLabel?: string;
@@ -46,7 +46,7 @@ export function IngestAction({
           className={`${buttonBase} ${buttonTone[tone]}`}
         >
           {busy ? <Spinner /> : null}
-          {busy ? "Ingesting…" : idleLabel}
+          {busy ? "Updating…" : idleLabel}
         </button>
 
         {ingest.phase === "done" || ingest.phase === "failed" ? (

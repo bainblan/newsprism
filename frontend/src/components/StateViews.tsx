@@ -48,7 +48,7 @@ export function NoDataState({ message }: { message: string }) {
         sites rather than on anything local.
       </p>
       <div className="pt-2">
-        <IngestAction tone="primary" idleLabel="Run first ingest" />
+        <IngestAction tone="primary" idleLabel="Get the news" />
       </div>
       <p className="border-t border-border pt-4 text-xs text-subtle">
         Backend reported <code className="font-mono">503 NO_DATA</code>
@@ -188,7 +188,7 @@ export function EmptyStoriesState() {
         </button>
       </div>
       <div className="pt-1">
-        <IngestAction tone="primary" idleLabel="Run ingest again" />
+        <IngestAction tone="primary" idleLabel="Update news" />
       </div>
     </Panel>
   );
