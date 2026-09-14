@@ -38,6 +38,21 @@ from app.timeutil import now_iso_z, to_iso_z, utcnow  # noqa: E402
 ISO_Z = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 
+def _recent(hours_ago: float = 0) -> str:
+    """A timestamp guaranteed inside the clustering window, right now.
+
+    The window (``settings.cluster_window_days``) is measured from
+    ``utcnow()``, not from any specific calendar date - a fixture that
+    hardcodes an absolute date (e.g. "2026-09-10T12:00:00Z") silently falls
+    out of the window as soon as real time passes it, which mints a fresh
+    story id every run and fails every test that asserts id stability. This
+    is the fix for that: always relative to whenever the suite actually
+    runs. ``hours_ago`` only exists to give fixture articles distinct-but-
+    still-in-window timestamps where a test cares about relative ordering.
+    """
+    return to_iso_z(utcnow() - timedelta(hours=hours_ago))
+
+
 def _window_ids() -> set[str]:
     """The real in-window article set, exactly as ``pipeline.recluster`` sees it.
 
@@ -116,7 +131,7 @@ def _seed(n_left: int = 2, n_right: int = 1) -> str:
                 lean="left",
                 title=f"Left headline {i}",
                 summary="Lead paragraph.",
-                published_at="2026-09-10T12:00:00Z",
+                published_at=_recent(),
             )
         )
     for i in range(n_right):
@@ -128,7 +143,7 @@ def _seed(n_left: int = 2, n_right: int = 1) -> str:
                 lean="right",
                 title=f"Right headline {i}",
                 summary="Lead paragraph.",
-                published_at="2026-09-10T13:00:00Z",
+                published_at=_recent(),
             )
         )
     store.upsert_articles(articles)
@@ -242,7 +257,7 @@ def test_limit_actually_limits(client):
             lean="left",
             title=f"Limit story {i}",
             summary="",
-            published_at=f"2026-09-10T1{i}:00:00Z",
+            published_at=_recent(hours_ago=i),
         )
         store.upsert_articles([article])
         _track([{"article_ids": [article.id], "title": article.title, "summary": ""}])
@@ -290,7 +305,7 @@ def test_stories_sorted_newest_first(client):
 # --------------------------------------------------------------------------
 
 
-def _article(id_, title, outlet="Vox", lean="left", published_at="2026-09-10T12:00:00Z"):
+def _article(id_, title, outlet="Vox", lean="left", published_at=None):
     return Article(
         id=id_,
         url=f"https://{id_}.example.com/story",
@@ -298,7 +313,7 @@ def _article(id_, title, outlet="Vox", lean="left", published_at="2026-09-10T12:
         lean=lean,
         title=title,
         summary="",
-        published_at=published_at,
+        published_at=published_at or _recent(),
     )
 
 

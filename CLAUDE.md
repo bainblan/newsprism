@@ -123,9 +123,9 @@ identity" below.
 Guardian headline and a National Review headline describe the same event — often
 with zero shared vocabulary — is what makes the product possible. TF-IDF cannot
 do it; that's why the embedding model is there. A working TF-IDF fallback exists
-behind `app/clustering/base.py` and produces 9 multi-article clusters where the
-embedding model produces 59, so it is a genuine fallback and genuinely much
-worse.
+behind `app/clustering/base.py`. Re-measured 2026-09-14 on the same 654-article
+window: TF-IDF 19 multi-article clusters, widest 3; ONNX 80, widest 9. A widest
+of 3 is not a spectrum, which is the product claim it fails.
 
 Threshold 0.62 was chosen by sweeping 0.54–0.70 against live data and picking
 the last point before the product's premise degrades: at 0.66 the flagship story
