@@ -56,6 +56,7 @@ backend/    FastAPI + SQLite, feedparser, onnxruntime
             app/clustering/onnx_embedding.py ← the default embedder
             app/clustering/embedding.py      ← torch reference, not installed
 docs/       api-contract.md  ← the frozen interface both halves were built against
+            architecture.md  ← six Mermaid flowcharts; every node is a real file
             testing.md       ← runner choice, script contract, what's worth testing
             onnx-migration.md ← slice 1.3 spec, measured costs, equivalence proof
             deploy.md        ← the Render runbook
@@ -242,14 +243,11 @@ permanent alias, chains flattened, resolved with a depth cap.
 - **Cooldown** — at most one run per `NEWSPRISM_INGEST_COOLDOWN_SECONDS`
   (default 900); anyone sooner gets `429` plus `Retry-After`.
 
-**Slice 1.4 got the axis wrong and 1.5 corrected it.** 1.4 required a token,
-reasoning that an open endpoint let anyone start unbounded runs. True, but a
-token bounds *who asks*, never *how much work they can demand* — and it did
-nothing about the actual crash, which needs no attacker at all: the cron firing
-while an operator runs one by hand is two concurrent runs and an OOM. Once the
-server bounds the work, the button is safe to show to strangers, so 1.5
-retired `NEXT_PUBLIC_SHOW_INGEST_CONTROL` entirely. **The token now buys only a
-cooldown bypass**, which the cron needs to keep its own timetable.
+**The token buys a cooldown bypass, never a lock bypass**, which is what lets
+the cron keep its own timetable. Slice 1.4 gated the endpoint with that token;
+1.5 reversed it, since authorization bounds *who asks*, never how much work
+they demand, and the OOM needs no attacker: cron firing while an operator runs
+one by hand is two concurrent runs. `NEXT_PUBLIC_SHOW_INGEST_CONTROL` is retired.
 
 `409` and `429` are **successes**, not errors — "already updating" and "already
 up to date" are good news for whoever clicked. They render in `role="status"`;
